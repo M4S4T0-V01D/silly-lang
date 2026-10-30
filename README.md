@@ -1,4 +1,15 @@
-# Silly
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="The Silly logo: a gradient snake shaped like an S">
+</p>
+
+<h1 align="center">Silly</h1>
+
+<p align="center">
+  <a href="https://m4s4t0-v01d.github.io/silly-lang/">Website</a> ·
+  <a href="https://m4s4t0-v01d.github.io/silly-lang/guide/getting-started.html">Getting started</a> ·
+  <a href="https://m4s4t0-v01d.github.io/silly-lang/guide/tour.html">Tour</a> ·
+  <a href="https://m4s4t0-v01d.github.io/silly-lang/std/index.html">Standard library</a>
+</p>
 
 **A memory-safe systems language with no heap.** Silly has no allocator, no
 garbage collector and no lifetime annotations. Every list, string and map lives
@@ -61,6 +72,10 @@ silly test tests/unit/prelude.silly
 ```
 
 Without the launcher, use `python3 -m silly ...` from this directory.
+
+New to Silly? Read [Getting started](docs/guide/getting-started.md), then
+[A tour of Silly](docs/guide/tour.md) and [Building a GUI](docs/guide/gui.md).
+All of the docs are also on the [website](https://m4s4t0-v01d.github.io/silly-lang/).
 
 ## A tour
 

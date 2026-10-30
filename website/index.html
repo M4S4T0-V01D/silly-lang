@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Silly: a memory-safe systems language with no heap</title>
+<meta name="description" content="Silly is a memory-safe systems language with no heap: Python's syntax, Rust-shaped types, native code via C, and a batteries-included standard library.">
+<meta property="og:title" content="Silly">
+<meta property="og:description" content="A memory-safe systems language with no heap.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="icon" href="favicon.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="hl.css">
+</head>
+<body class="home" data-root="">
+<header class="top">
+  <a class="brand" href="index.html"><img src="logo.svg" alt="" width="28" height="28">Silly</a>
+  <div class="search">
+    <input id="q" type="search" placeholder="Search the docs  ( / )" autocomplete="off" aria-label="Search">
+    <div id="results" class="results" hidden></div>
+  </div>
+  <nav class="links">
+    <a href="guide/getting-started.html">Docs</a>
+    <a href="std/index.html">Library</a>
+    <a href="{{repo}}">GitHub</a>
+  </nav>
+</header>
+
+<section class="hero">
+  <img class="logo" src="logo.svg" alt="The Silly logo: a gradient snake shaped like an S">
+  <h1>Silly</h1>
+  <p class="tag">A memory-safe systems language with no heap.</p>
+  <p class="sub">Python's syntax, Rust-shaped types, and native code by way of C.
+  No allocator, no garbage collector, no lifetime annotations, and a
+  batteries-included standard library.</p>
+  <div class="buttons">
+    <a class="btn primary" href="guide/getting-started.html">Get started</a>
+    <a class="btn" href="guide/tour.html">Take the tour</a>
+    <a class="btn" href="{{repo}}">GitHub</a>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Looks like Python. Runs like C.</h2>
+  <p class="lead">Every list, string and map lives on a data stack the compiler
+  manages. Growing a value bumps a pointer, and leaving a scope frees
+  everything it made in one store.</p>
+  <div class="split">
+<pre data-silly>
+enum Shape:
+    Circle(f64)
+    Rect(w: f64, h: f64)
+
+fn area(s: Shape) -&gt; f64:
+    match s:
+        case Circle(r): return 3.14159 * r * r
+        case Rect(w, h): return w * h
+
+fn main():
+    var total = 0.0
+    for i in 0..1_000_000:
+        # a fresh list each time, freed by
+        # the loop itself: no GC, no free()
+        let shapes = [Shape.Circle(1.0),
+                      Shape.Rect(2.0, i as f64)]
+        for s in shapes:
+            total += area(s)
+    print(f"{total:.1f}")
+</pre>
+<pre data-silly>
+fn parse_all(xs: &amp;list[str]) -&gt; Result[list[int], str]:
+    var out: list[int] = []
+    for x in xs:
+        out.push(x.parse_int().ok_or(f"not a number: {x}")?)
+    return Ok(out)
+
+fn largest[T: Ord + Copy](xs: &amp;list[T]) -&gt; T:
+    var best = xs[0]
+    for x in xs:
+        if x &gt; best:
+            best = x
+    return best
+
+fn main():
+    match parse_all(&amp;["10", "25", "7"]):
+        case Ok(nums): print(largest(&amp;nums))     # 25
+        case Err(e): print("error:", e)
+    let tasks = [spawn(fn() =&gt; 6 * 7), spawn(fn() =&gt; 2 ** 10)]
+    print(join_all(tasks))                    # [42, 1024]
+</pre>
+  </div>
+</section>
+
+<section class="section">
+  <h2>What you get</h2>
+  <p class="lead">Safety is checked by the compiler, not paid for at run time.</p>
+  <div class="cards">
+    <div class="card"><span class="ico">⚡</span><h3>No heap, no GC</h3>
+      <p>Allocation is a pointer bump and freeing a scope is a single store. Allocation-heavy
+      code written the obvious way runs like hand-tuned arena code.</p></div>
+    <div class="card"><span class="ico">🛡️</span><h3>Memory-safe</h3>
+      <p>No use after free, no out-of-bounds reads, no data races. Moves and borrows are
+      checked at compile time; indexing is always bounds-checked.</p></div>
+    <div class="card"><span class="ico">🪶</span><h3>No lifetimes to write</h3>
+      <p>References are only ever function parameters, so every borrow ends when its call
+      returns, and the compiler needs no annotations to prove it.</p></div>
+    <div class="card"><span class="ico">🐍</span><h3>Python's syntax</h3>
+      <p>Indentation, f-strings, <code>for x in xs</code>, slices, <code>//</code> and
+      <code>**</code>, with enums, pattern matching, generics and traits on top.</p></div>
+    <div class="card"><span class="ico">🔋</span><h3>Batteries included</h3>
+      <p>36 standard modules: <code>json</code>, <code>re</code>, <code>datetime</code>,
+      <code>subprocess</code>, <code>http</code>, <code>argparse</code> and more, plus
+      graphics and a widget toolkit.</p></div>
+    <div class="card"><span class="ico">🧵</span><h3>Threads without locks</h3>
+      <p><code>spawn</code> runs a closure on its own thread with its own stack. Tasks share
+      nothing, so there is nothing to lock and nothing to race.</p></div>
+  </div>
+</section>
+
+<section class="section">
+  <h2>Fast where it counts</h2>
+  <p class="lead">Against idiomatic C++ (<code>g++ -O2</code>) and Rust
+  (<code>rustc -C opt-level=3</code>). All three print identical output.</p>
+  <table class="bench">
+    <tr><th>benchmark</th><th>Silly</th><th>C++</th><th>Rust</th></tr>
+    <tr><td>trees (allocation-heavy)</td><td class="win">258 ms / 12 MiB</td><td>1610 ms / 36 MiB</td><td>1993 ms / 34 MiB</td></tr>
+    <tr><td>strings (format / split / parse)</td><td class="win">101 ms</td><td>286 ms</td><td>227 ms</td></tr>
+    <tr><td>collatz (short-lived lists)</td><td class="win">198 ms</td><td>317 ms</td><td>250 ms</td></tr>
+    <tr><td>wordfreq (strings + hash map)</td><td>205 ms / 134 MiB</td><td class="win">177 ms / 97 MiB</td><td>273 ms / 128 MiB</td></tr>
+    <tr><td>nbody (float math)</td><td>271 ms</td><td>270 ms</td><td class="win">167 ms</td></tr>
+    <tr><td>sieve (one flat buffer)</td><td>359 ms</td><td class="win">341 ms</td><td>351 ms</td></tr>
+  </table>
+  <p class="note">Silly wins where allocation dominates and ties on pure computation.
+  <a href="{{repo}}/blob/main/benchmarks/README.md">Method and caveats</a>.</p>
+</section>
+
+<section class="section">
+  <h2>Windows and widgets, built in</h2>
+  <p class="lead"><code>gfx</code> draws anti-aliased shapes and text in a window;
+  <code>ui</code> is an immediate-mode widget toolkit on top of it.
+  <a href="guide/gui.html">Build a GUI</a>.</p>
+  <img class="shot" src="guide/img/gui-studio.png" alt="A Silly ui program with a settings panel and a shape preview" width="640" height="400">
+</section>
+
+<section class="section">
+  <h2>Try it</h2>
+  <p class="lead">You need Python 3.11+ and gcc. There is nothing to build.</p>
+  <div class="install">
+<pre><span class="c"># get the compiler</span>
+git clone {{repo}}.git
+cd silly-lang
+export PATH="$PWD/bin:$PATH"
+
+<span class="c"># run a program, or build a native binary</span>
+silly run examples/hello.silly
+silly build --opt release examples/wordfreq.silly -o wordfreq</pre>
+  </div>
+  <div class="buttons">
+    <a class="btn primary" href="guide/getting-started.html">Getting started</a>
+    <a class="btn" href="spec.html">Language reference</a>
+    <a class="btn" href="std/index.html">Standard library</a>
+  </div>
+</section>
+
+<footer>
+  Silly is free software under the <a href="{{repo}}/blob/main/LICENSE">MIT License</a>.
+  · <a href="{{repo}}">Source on GitHub</a>
+</footer>
+<script src="site.js"></script>
+</body>
+</html>

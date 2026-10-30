@@ -20,8 +20,11 @@ fn main():
 ```
 
 Colors are ints 0xAARRGGBB (see rgb / rgba). Windows use SDL2 when it is
-installed and a display is available; otherwise they are headless (see
-docs/std/gfx.md for SILLY_GFX, SILLY_GFX_SHOT and SILLY_GFX_FRAMES).
+installed and a display is available; otherwise they are headless.
+SILLY_GFX=headless forces headless mode. A headless window saves each
+presented frame to the PNG named by SILLY_GFX_SHOT, if set, and asks to quit
+after SILLY_GFX_FRAMES frames (default 3). SDL2 is loaded at run time, so
+programs build without its headers.
 
 ## Constants
 

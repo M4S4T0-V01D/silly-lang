@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} · Silly</title>
+<link rel="icon" href="{{root}}logo.svg" type="image/svg+xml">
+<link rel="icon" href="{{root}}favicon.png" type="image/png">
+<link rel="stylesheet" href="{{root}}style.css">
+<link rel="stylesheet" href="{{root}}hl.css">
+</head>
+<body class="doc" data-root="{{root}}">
+<header class="top">
+  <button class="menu" id="menu" aria-label="Menu">☰</button>
+  <a class="brand" href="{{root}}index.html"><img src="{{root}}logo.svg" alt="" width="28" height="28">Silly</a>
+  <div class="search">
+    <input id="q" type="search" placeholder="Search the docs  ( / )" autocomplete="off" aria-label="Search">
+    <div id="results" class="results" hidden></div>
+  </div>
+  <nav class="links">
+    <a href="{{root}}guide/getting-started.html">Docs</a>
+    <a href="{{root}}std/index.html">Library</a>
+    <a href="{{repo}}">GitHub</a>
+  </nav>
+</header>
+<div class="layout">
+{{nav}}
+<main class="content">
+<article>
+{{body}}
+</article>
+<p class="edit"><a href="{{edit}}">Edit this page on GitHub</a></p>
+</main>
+{{toc}}
+</div>
+<script src="{{root}}site.js"></script>
+</body>
+</html>
