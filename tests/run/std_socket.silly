@@ -1,0 +1,63 @@
+# socket: TCP echo over threads, refused/unknown host errors, UDP sendto/recvfrom, timeouts
+
+import socket
+
+fn main():
+    let server = socket.listen(&"127.0.0.1", 0, 16).unwrap()
+    let port = server.local_port()
+    print(port > 0)
+    let t = spawn(fn() => client(port))
+    let c = server.accept().unwrap()
+    let (addr, _) = c.peer()
+    print("peer", addr)
+    var got = ""
+    while not got.ends_with("\n"):
+        got += c.recv(4).unwrap()
+    print("server got", got.trim())
+    c.send(&("echo " + got)).unwrap()
+    c.shutdown().unwrap()
+    print("client got", t.join())
+    print(c.recv(10).unwrap() == "")
+    c.close()
+    server.close()
+    match socket.connect(&"127.0.0.1", port):
+        case Ok(_): print("unexpected")
+        case Err(e): print(e)
+    match socket.connect(&"no.such.host.invalid", 80):
+        case Ok(_): print("unexpected")
+        case Err(e): print(e.starts_with("no.such.host.invalid:"))
+    print(socket.gethostbyname(&"localhost").unwrap())
+    # UDP
+    let u = socket.udp_bind(&"127.0.0.1", 0).unwrap()
+    let up = u.local_port()
+    let s = socket.udp(&"127.0.0.1").unwrap()
+    print(s.sendto(&"ping", &"127.0.0.1", up).unwrap())
+    print(u.ready(1.0).unwrap())
+    let (msg, from_, _) = u.recvfrom(100).unwrap()
+    print(msg, from_)
+    u.set_timeout(0.05).unwrap()
+    match u.recvfrom(100):
+        case Ok(_): print("unexpected")
+        case Err(e): print(e)
+    print(u.ready(0.01).unwrap())
+
+fn client(port: int) -> str:
+    let s = socket.connect(&"127.0.0.1", port).unwrap()
+    s.send(&"hello there\n").unwrap()
+    let r = s.recv_all().unwrap()
+    s.close()
+    return r.trim()
+
+#> true
+#> peer 127.0.0.1
+#> server got hello there
+#> client got echo hello there
+#> true
+#> connect: Connection refused
+#> true
+#> 127.0.0.1
+#> 4
+#> true
+#> ping 127.0.0.1
+#> recvfrom: timed out
+#> false

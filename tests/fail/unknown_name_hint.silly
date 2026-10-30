@@ -1,0 +1,4 @@
+# error: did you mean 'value'
+fn main():
+    let value = 3
+    print(valeu)

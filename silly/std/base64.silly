@@ -1,0 +1,176 @@
+# Base64, Base32 and hex encodings of byte strings, like Python's base64 and binascii.
+#
+#     import base64
+#     fn main():
+#         print(base64.encode("hello"))                    # aGVsbG8=
+#         match base64.decode("aGVsbG8="):
+#             case Ok(s): print(s)                         # hello
+#             case Err(e): print(e)
+#         print(base64.urlsafe_encode("\u{fb}\u{ff}"))     # w7vDvw==
+#         print(base64.hex_encode("hi"))                   # 6869
+#
+# Decoding ignores whitespace and returns Err for anything else that doesn't fit.
+
+import hashlib
+
+const _STD: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+const _URL: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+const _B32: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+fn _encode(s: &str, alphabet: &str, pad: bool) -> str:
+    let a = alphabet.bytes()
+    let b = s.bytes()
+    var out: list[u8] = []
+    var i = 0
+    while i + 3 <= len(b):
+        let n = (b[i] as int) << 16 | (b[i + 1] as int) << 8 | b[i + 2] as int
+        out.push(a[n >> 18])
+        out.push(a[(n >> 12) & 63])
+        out.push(a[(n >> 6) & 63])
+        out.push(a[n & 63])
+        i += 3
+    let rest = len(b) - i
+    if rest == 1:
+        let n = (b[i] as int) << 16
+        out.push(a[n >> 18])
+        out.push(a[(n >> 12) & 63])
+        if pad:
+            out.push(61)
+            out.push(61)
+    elif rest == 2:
+        let n = (b[i] as int) << 16 | (b[i + 1] as int) << 8
+        out.push(a[n >> 18])
+        out.push(a[(n >> 12) & 63])
+        out.push(a[(n >> 6) & 63])
+        if pad:
+            out.push(61)
+    return hashlib.from_bytes(&out)
+
+# The value of each byte in the alphabet, -1 for bytes outside it.
+fn _table(alphabet: &str) -> list[int]:
+    var t: list[int] = []
+    for _ in 0..256:
+        t.push(-1)
+    var i = 0
+    for c in alphabet.bytes():
+        t[c as int] = i
+        i += 1
+    return t
+
+fn _decode(s: &str, alphabet: &str) -> Result[str, str]:
+    let t = _table(alphabet)
+    var out: list[u8] = []
+    var acc = 0
+    var bits = 0
+    var pads = 0
+    var count = 0
+    for c in s.bytes():
+        if c == 32 or c == 9 or c == 10 or c == 13:
+            continue
+        if c == 61:
+            pads += 1
+            continue
+        let v = t[c as int]
+        if v < 0:
+            return Err("base64: invalid character '" + str(chr(c as int)) + "'")
+        if pads > 0:
+            return Err("base64: data after padding")
+        acc = (acc << 6 | v) & 0xFFFFFF
+        bits += 6
+        count += 1
+        if bits >= 8:
+            bits -= 8
+            out.push(((acc >> bits) & 255) as u8)
+    if count % 4 == 1:
+        return Err("base64: truncated input")
+    if pads > 0 and (count + pads) % 4 != 0:
+        return Err("base64: incorrect padding")
+    return Ok(hashlib.from_bytes(&out))
+
+# Standard Base64 (RFC 4648) with = padding.
+fn encode(s: &str) -> str:
+    return _encode(s, _STD, true)
+
+# Reverses encode; an error for text that isn't valid base64.
+fn decode(s: &str) -> Result[str, str]:
+    return _decode(s, _STD)
+
+# The URL- and filename-safe alphabet, - and _ in place of + and /.
+fn urlsafe_encode(s: &str) -> str:
+    return _encode(s, _URL, true)
+
+# Reverses urlsafe_encode.
+fn urlsafe_decode(s: &str) -> Result[str, str]:
+    return _decode(s, _URL)
+
+# URL-safe without padding, as used in JWTs.
+fn urlsafe_encode_nopad(s: &str) -> str:
+    return _encode(s, _URL, false)
+
+# Base32 (RFC 4648) with = padding.
+fn b32_encode(s: &str) -> str:
+    let a = _B32.bytes()
+    var out: list[u8] = []
+    var acc = 0
+    var bits = 0
+    for c in s.bytes():
+        acc = (acc << 8 | c as int) & 0xFFFF
+        bits += 8
+        while bits >= 5:
+            bits -= 5
+            out.push(a[(acc >> bits) & 31])
+    if bits > 0:
+        out.push(a[(acc << (5 - bits)) & 31])
+    while len(out) % 8 != 0:
+        out.push(61)
+    return hashlib.from_bytes(&out)
+
+# Reverses b32_encode.
+fn b32_decode(s: &str) -> Result[str, str]:
+    let t = _table(_B32)
+    var out: list[u8] = []
+    var acc = 0
+    var bits = 0
+    var pads = 0
+    for c in s.upper().bytes():
+        if c == 61:
+            pads += 1
+            continue
+        let v = t[c as int]
+        if v < 0 or pads > 0:
+            return Err("base32: invalid input")
+        acc = (acc << 5 | v) & 0xFFFF
+        bits += 5
+        if bits >= 8:
+            bits -= 8
+            out.push(((acc >> bits) & 255) as u8)
+    return Ok(hashlib.from_bytes(&out))
+
+# Each byte as two lowercase hex digits.
+fn hex_encode(s: &str) -> str:
+    return hashlib.hex(s)
+
+fn _nibble(c: u8) -> int:
+    if c >= 48 and c <= 57:
+        return c as int - 48
+    if c >= 97 and c <= 102:
+        return c as int - 87
+    if c >= 65 and c <= 70:
+        return c as int - 55
+    return -1
+
+# Reverses hex_encode (either case); an error for odd lengths or non-hex digits.
+fn hex_decode(s: &str) -> Result[str, str]:
+    let b = s.bytes()
+    if len(b) % 2 != 0:
+        return Err("hex: odd number of digits")
+    var out: list[u8] = []
+    var i = 0
+    while i < len(b):
+        let hi = _nibble(b[i])
+        let lo = _nibble(b[i + 1])
+        if hi < 0 or lo < 0:
+            return Err("hex: invalid digit at " + str(i if hi < 0 else i + 1))
+        out.push((hi * 16 + lo) as u8)
+        i += 2
+    return Ok(hashlib.from_bytes(&out))

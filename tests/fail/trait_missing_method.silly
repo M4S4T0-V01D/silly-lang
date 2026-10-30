@@ -1,0 +1,11 @@
+# error: is missing: other
+trait Show:
+    fn show(self) -> str
+    fn other(self) -> int
+struct P:
+    x: int
+impl Show for P:
+    fn show(self) -> str:
+        return "p"
+fn main():
+    return

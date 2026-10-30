@@ -1,0 +1,124 @@
+# Silly Core only: strings and lists, also run through the self-hosted compiler.
+#! exit 101
+#! stderr core_text.silly:104:15: index 7 is out of range for length 4
+
+struct Entry:
+    word: str
+    count: int
+
+fn tally(words: &list[str]) -> list[Entry]:
+    var out: list[Entry] = []
+    for w in words:
+        var found = false
+        for i in 0..len(out):
+            if out[i].word == w:
+                out[i].count += 1
+                found = true
+                break
+        if not found:
+            out.push(Entry(w, 1))
+    return out
+
+fn reverse_words(s: str) -> str:
+    var ws = s.split()
+    ws.reverse()
+    return " ".join(ws)
+
+fn caesar(s: str, k: int) -> str:
+    var out = ""
+    for ch in s:
+        if ch >= 'a' and ch <= 'z':
+            out += str(chr((ord(ch) - ord('a') + k) % 26 + ord('a')))
+        else:
+            out += str(ch)
+    return out
+
+fn build(n: int) -> str:
+    # Many temporary strings; the data stack is reset when the caller's scope ends.
+    var s = ""
+    for i in 0..n:
+        s += str(i % 10)
+    return s
+
+fn digits_sum(s: &str) -> int:
+    var t = 0
+    for b in s.bytes():
+        t += (b - '0') as int
+    return t
+
+fn show(xs: &list[int]) -> str:
+    var parts: list[str] = []
+    for x in xs:
+        parts.push(str(x))
+    return "[" + ", ".join(parts) + "]"
+
+fn main():
+    let text = "the quick brown fox jumps over the lazy dog the end"
+    let words = text.split(" ")
+    let counts = tally(&words)
+    for e in counts:
+        if e.count > 1:
+            print(e.word, e.count)
+    print(len(words), len(counts))
+    print(reverse_words("one two  three"))
+    print(caesar("hello, world", 3), caesar(caesar("abc xyz", 5), 21))
+    print(text.upper()[0:9], "  padded  ".trim() + "|", "x,y,,z".split(",").len())
+    print(text.starts_with("the"), text.ends_with("dog"), text.contains("fox"), text.count("the"))
+    print(text.find("brown").unwrap(), text.find("cat").is_none(), text.replace("the", "a"))
+    print("line1\nline2\nline3".lines().len(), "tab\there", 'A', ord('A'), chr(97))
+    print(text[-3:], text[4:9], len("héllo"))
+
+    var nums = [5, 3, 9, 1, 7]
+    nums.sort()
+    print(show(&nums), nums.contains(9), nums.index_of(7).unwrap(), nums.first().unwrap(), nums.last().unwrap())
+    nums.insert(0, 100)
+    let gone = nums.remove(2)
+    nums.swap(0, 1)
+    let top = nums.pop()
+    print(show(&nums), gone, top, len(nums))
+    var more = nums.clone()
+    more.extend([4, 4])
+    more.truncate(5)
+    print(show(&more), show(&nums), more.get(10).is_none())
+    var grid: list[list[int]] = []
+    for r in 0..3:
+        var row: list[int] = []
+        for c in 0..3:
+            row.push(r * 3 + c)
+        grid.push(row)
+    grid[1][1] = -1
+    for row in grid:
+        print(show(&row))
+
+    var total = 0
+    for round in 0..200:
+        let s = build(1000)
+        total += digits_sum(&s)
+    print(total)
+
+    let parsed = "1234".parse_int()
+    print(parsed.unwrap() + 1, "12x".parse_int().is_none())
+    assert nums.len() == 4
+    let empty: list[int] = []
+    print(empty.is_empty(), "".is_empty())
+    print(nums[7])
+
+# expected output
+#> the 3
+#> 11 9
+#> three two one
+#> khoor, zruog abc xyz
+#> THE QUICK padded| 4
+#> true false true 3
+#> 10 true a quick brown fox jumps over a lazy dog a end
+#> 3 tab	here A 65 a
+#> end quick 6
+#> [1, 3, 5, 7, 9] true 3 1 9
+#> [1, 100, 5, 7] 3 9 4
+#> [1, 100, 5, 7, 4] [1, 100, 5, 7] true
+#> [0, 1, 2]
+#> [3, -1, 5]
+#> [6, 7, 8]
+#> 900000
+#> 1235 true
+#> true true

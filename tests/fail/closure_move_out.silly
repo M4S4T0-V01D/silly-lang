@@ -1,0 +1,6 @@
+# error: cannot move captured variable
+fn main():
+    let xs = [1, 2]
+    let f = fn() -> list[int]:
+        return xs
+    print(f())

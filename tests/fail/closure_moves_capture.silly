@@ -1,0 +1,5 @@
+# error: 'xs' was moved
+fn main():
+    let xs = [1, 2]
+    let f = fn() => len(xs)
+    print(xs)

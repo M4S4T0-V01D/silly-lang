@@ -1,0 +1,7 @@
+# error: cannot move out of reference parameter
+fn take(xs: &list[int]) -> list[int]:
+    return xs
+
+fn main():
+    let a = [1]
+    print(take(&a))

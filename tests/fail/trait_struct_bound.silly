@@ -1,0 +1,7 @@
+# error: i64 does not implement Show
+trait Show:
+    fn show(self) -> str
+struct S[T: Show]:
+    x: T
+fn main():
+    let s = S(1)

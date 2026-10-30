@@ -1,0 +1,40 @@
+# tempfile: mkstemp, mkdtemp, with_tempdir
+
+import os
+import path
+import tempfile
+
+fn main():
+    let base = tempfile.gettempdir()
+    let f = tempfile.mkstemp("tfx-", ".txt").unwrap()
+    print(f.starts_with(base + "/tfx-"), f.ends_with(".txt"), len(path.basename(&f)), os.read(f.clone()).unwrap() == "")
+    print(os.mode(f.clone()).unwrap() & 0o777 == 0o600)
+    let g = tempfile.write_temp("tfx-", "", "abc").unwrap()
+    print(g != f, os.read(g.clone()).unwrap())
+    let d = tempfile.mkdtemp("tfx-").unwrap()
+    print(os.is_dir(d.clone()))
+    let e = tempfile.mkdtemp_in(&d, "in-").unwrap()
+    print(os.is_dir(e.clone()), path.dirname(&e) == d, os.mode(e.clone()).unwrap() & 0o777 == 0o700)
+    let h = tempfile.mkstemp_in(&e, "", ".log").unwrap()
+    print(path.dirname(&h) == e, len(path.basename(&h)))
+    let m = tempfile.mktemp(&"x", &"", &d)
+    print(os.exists(m.clone()), path.dirname(&m) == d)
+    let n = tempfile.with_tempdir("tfx-", fn(dir) => len(os.listdir(dir).unwrap())).unwrap()
+    print(n)
+    let gone = tempfile.with_tempdir("tfx-", fn(dir) => dir).unwrap()
+    print(gone.starts_with(base), os.exists(gone))
+    os.remove(f).unwrap()
+    os.remove(g).unwrap()
+    os.remove_all(d.clone()).unwrap()
+    print(os.exists(d))
+
+#> true true 24 true
+#> true
+#> true abc
+#> true
+#> true true true
+#> true 20
+#> false true
+#> 0
+#> true false
+#> false

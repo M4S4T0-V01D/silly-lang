@@ -1,0 +1,261 @@
+# Comparing sequences of lines (or characters): unified diffs, similarity
+# ratios and close matches, like Python's difflib.
+#
+#     import difflib
+#     fn main():
+#         let a = "one\ntwo\nthree".split("\n")
+#         let b = "one\n2\nthree\nfour".split("\n")
+#         for line in difflib.unified_diff(&a, &b, &"old.txt", &"new.txt", 3):
+#             print(line)
+#         print(difflib.ratio(&"kitten", &"sitting"))                    # 0.6153846153846154
+#         print(difflib.get_close_matches(&"appel", &["ape", "apple", "peach"], 3, 0.6))
+#         # ["apple", "ape"]
+#
+# This is Python's SequenceMatcher (longest matching block first, then the
+# pieces either side) without its junk heuristics, so the results are Python's
+# for inputs under 200 items, and still good diffs above that.
+
+# A run of size equal items at a[a] and b[b].
+struct Match:
+    a: int                          # start in the first sequence
+    b: int                          # start in the second
+    size: int
+
+# One step turning a[i1:i2] into b[j1:j2]: "equal", "replace", "delete" or "insert".
+struct Opcode:
+    tag: str
+    i1: int
+    i2: int
+    j1: int
+    j2: int
+
+    fn str(self) -> str:
+        return self.tag + " a[" + str(self.i1) + ":" + str(self.i2) + "] b[" + str(self.j1) + ":" + str(self.j2) + "]"
+
+# Compares two lists of strings, like Python's SequenceMatcher.
+struct Matcher:
+    a: list[str]
+    b: list[str]
+    b2j: map[str, list[int]]        # where each item of b appears
+
+    # The longest block a[i:i+k] == b[j:j+k] inside the given ranges, leftmost
+    # in a and then in b on ties.
+    fn longest_match(self, alo: int, ahi: int, blo: int, bhi: int) -> Match:
+        var besti = alo
+        var bestj = blo
+        var best = 0
+        var j2len: map[int, int] = {}
+        for i in alo..ahi:
+            var next: map[int, int] = {}
+            if self.b2j.contains(self.a[i].clone()):
+                for j in self.b2j[self.a[i].clone()]:
+                    if j < blo:
+                        continue
+                    if j >= bhi:
+                        break
+                    let k = j2len.get_or(j - 1, 0) + 1
+                    next[j] = k
+                    if k > best:
+                        besti = i - k + 1
+                        bestj = j - k + 1
+                        best = k
+            j2len = next
+        return Match(besti, bestj, best)
+
+    # Every maximal matching block in order, ending with Match(len(a), len(b), 0).
+    fn matching_blocks(self) -> list[Match]:
+        var todo: list[(int, int, int, int)] = [(0, len(self.a), 0, len(self.b))]
+        var found: list[Match] = []
+        while len(todo) > 0:
+            let (alo, ahi, blo, bhi) = todo.pop()
+            let m = self.longest_match(alo, ahi, blo, bhi)
+            if m.size > 0:
+                if alo < m.a and blo < m.b:
+                    todo.push((alo, m.a, blo, m.b))
+                if m.a + m.size < ahi and m.b + m.size < bhi:
+                    todo.push((m.a + m.size, ahi, m.b + m.size, bhi))
+                found.push(m)
+        found.sort_by(fn(m: Match) => (m.a, m.b))
+        # Join blocks that touch.
+        var out: list[Match] = []
+        var i1 = 0
+        var j1 = 0
+        var k1 = 0
+        for m in found:
+            if i1 + k1 == m.a and j1 + k1 == m.b:
+                k1 += m.size
+            else:
+                if k1 > 0:
+                    out.push(Match(i1, j1, k1))
+                i1 = m.a
+                j1 = m.b
+                k1 = m.size
+        if k1 > 0:
+            out.push(Match(i1, j1, k1))
+        out.push(Match(len(self.a), len(self.b), 0))
+        return out
+
+    # The steps that turn a into b.
+    fn opcodes(self) -> list[Opcode]:
+        var out: list[Opcode] = []
+        var i = 0
+        var j = 0
+        for m in self.matching_blocks():
+            var tag = ""
+            if i < m.a and j < m.b:
+                tag = "replace"
+            elif i < m.a:
+                tag = "delete"
+            elif j < m.b:
+                tag = "insert"
+            if tag != "":
+                out.push(Opcode(tag, i, m.a, j, m.b))
+            i = m.a + m.size
+            j = m.b + m.size
+            if m.size > 0:
+                out.push(Opcode("equal", m.a, i, m.b, j))
+        return out
+
+    # The opcodes split into hunks, each with up to n equal items of context.
+    fn grouped_opcodes(self, n: int) -> list[list[Opcode]]:
+        var codes = self.opcodes()
+        if len(codes) == 0:
+            codes = [Opcode("equal", 0, 1, 0, 1)]
+        if codes[0].tag == "equal":
+            let c = codes[0].clone()
+            codes[0] = Opcode("equal", _max(c.i1, c.i2 - n), c.i2, _max(c.j1, c.j2 - n), c.j2)
+        let last = len(codes) - 1
+        if codes[last].tag == "equal":
+            let c = codes[last].clone()
+            codes[last] = Opcode("equal", c.i1, _min(c.i2, c.i1 + n), c.j1, _min(c.j2, c.j1 + n))
+        var groups: list[list[Opcode]] = []
+        var group: list[Opcode] = []
+        for c in codes:
+            var i1 = c.i1
+            var j1 = c.j1
+            if c.tag == "equal" and c.i2 - c.i1 > n + n:
+                group.push(Opcode("equal", c.i1, _min(c.i2, c.i1 + n), c.j1, _min(c.j2, c.j1 + n)))
+                groups.push(group)
+                group = []
+                i1 = _max(c.i1, c.i2 - n)
+                j1 = _max(c.j1, c.j2 - n)
+            group.push(Opcode(c.tag.clone(), i1, c.i2, j1, c.j2))
+        if len(group) > 0 and not (len(group) == 1 and group[0].tag == "equal"):
+            groups.push(group)
+        return groups
+
+    # 2 * matches / total length, from 0.0 (nothing alike) to 1.0 (the same).
+    fn ratio(self) -> f64:
+        var m = 0
+        for b in self.matching_blocks():
+            m += b.size
+        return _ratio(m, len(self.a) + len(self.b))
+
+    # An upper bound on ratio(), from counting shared items; cheaper.
+    fn quick_ratio(self) -> f64:
+        var avail: map[str, int] = {}
+        for x in self.b:
+            avail[x.clone()] = avail.get_or(x.clone(), 0) + 1
+        var m = 0
+        for x in self.a:
+            let n = avail.get_or(x.clone(), 0)
+            if n > 0:
+                avail[x.clone()] = n - 1
+                m += 1
+        return _ratio(m, len(self.a) + len(self.b))
+
+    # An upper bound on ratio() from the lengths alone; very cheap.
+    fn real_quick_ratio(self) -> f64:
+        return _ratio(_min(len(self.a), len(self.b)), len(self.a) + len(self.b))
+
+fn _min(a: int, b: int) -> int:
+    return a if a < b else b
+
+fn _max(a: int, b: int) -> int:
+    return a if a > b else b
+
+fn _ratio(m: int, total: int) -> f64:
+    if total == 0:
+        return 1.0
+    return 2.0 * m as f64 / total as f64
+
+# A matcher comparing two lists (usually lines).
+fn matcher(a: &list[str], b: &list[str]) -> Matcher:
+    var b2j: map[str, list[int]] = {}
+    for j in 0..len(b):
+        if not b2j.contains(b[j].clone()):
+            b2j[b[j].clone()] = []
+        b2j[b[j].clone()].push(j)
+    return Matcher(a.clone(), b.clone(), b2j)
+
+fn _chars(s: &str) -> list[str]:
+    var out: list[str] = []
+    for c in s.chars():
+        out.push(str(c))
+    return out
+
+# A matcher comparing two strings character by character.
+fn char_matcher(a: &str, b: &str) -> Matcher:
+    return matcher(&_chars(a), &_chars(b))
+
+# How alike two strings are, from 0.0 to 1.0.
+fn ratio(a: &str, b: &str) -> f64:
+    return char_matcher(a, b).ratio()
+
+fn _range(start: int, stop: int) -> str:
+    let len = stop - start
+    if len == 1:
+        return str(start + 1)
+    if len == 0:
+        return str(start) + ",0"
+    return str(start + 1) + "," + str(len)
+
+# The lines of a unified diff (as `diff -u` prints, without line endings), with
+# n lines of context. Empty if the lists are equal.
+fn unified_diff(a: &list[str], b: &list[str], from_file: &str, to_file: &str, n: int) -> list[str]:
+    var out: list[str] = []
+    for group in matcher(a, b).grouped_opcodes(n):
+        if len(out) == 0:
+            out.push("--- " + from_file)
+            out.push("+++ " + to_file)
+        let first = group[0].clone()
+        let last = group[len(group) - 1].clone()
+        out.push("@@ -" + _range(first.i1, last.i2) + " +" + _range(first.j1, last.j2) + " @@")
+        for c in group:
+            if c.tag == "equal":
+                for i in c.i1..c.i2:
+                    out.push(" " + a[i])
+                continue
+            if c.tag == "replace" or c.tag == "delete":
+                for i in c.i1..c.i2:
+                    out.push("-" + a[i])
+            if c.tag == "replace" or c.tag == "insert":
+                for j in c.j1..c.j2:
+                    out.push("+" + b[j])
+    return out
+
+# The unified diff of two texts, as one string ("" if they're the same).
+fn diff_text(a: &str, b: &str, from_file: &str, to_file: &str) -> str:
+    let lines = unified_diff(&a.split("\n"), &b.split("\n"), from_file, to_file, 3)
+    if len(lines) == 0:
+        return ""
+    return "\n".join(lines) + "\n"
+
+# Up to n of the possibilities at least cutoff alike to word, best first.
+fn get_close_matches(word: &str, possibilities: &list[str], n: int, cutoff: f64) -> list[str]:
+    var scored: list[(f64, str)] = []
+    let w = _chars(word)
+    for p in possibilities:
+        let m = matcher(&_chars(&p), &w)
+        if m.real_quick_ratio() >= cutoff and m.quick_ratio() >= cutoff:
+            let r = m.ratio()
+            if r >= cutoff:
+                scored.push((r, p.clone()))
+    # Best score first; ties go to the larger string, as Python's do.
+    scored.sort()
+    scored.reverse()
+    var out: list[str] = []
+    for (_, p) in scored:
+        if len(out) < n:
+            out.push(p)
+    return out

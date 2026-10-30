@@ -1,0 +1,21 @@
+# The path module: pure string path manipulation.
+
+import path
+fn main():
+    print(path.join("src", "main.silly"), path.join("a/", "/abs"), path.join_all(&["a", "b", "c.txt"]))
+    print(path.split("a/b/c.txt"), path.split("/x"), path.split("name"), path.split("a//b"))
+    print(path.basename("a/b.txt"), path.dirname("a/b.txt"), path.dirname("/top"))
+    print(path.splitext("a/b.tar.gz"), path.splitext(".bashrc"), path.splitext("a.d/file"), path.splitext("..x"))
+    print(path.ext("x.PNG"), path.stem("dir/archive.tar.gz"), path.with_ext("a/b.c", ".txt"))
+    print(path.parts("/usr//lib/x"), path.normalize("a/./b/../c"), path.normalize("/../a/"), path.normalize("../../x/.."))
+    print(path.is_abs("/a"), path.abspath("/a/b/../c"), path.relpath("/a/b/c", "/a/d"), path.relpath("/a", "/a"))
+    print(path.expanduser("~/x").ends_with("/x"), path.expanduser("~/x").starts_with("~"))
+
+#> src/main.silly /abs a/b/c.txt
+#> ("a/b", "c.txt") ("/", "x") ("", "name") ("a", "b")
+#> b.txt a /
+#> ("a/b.tar", ".gz") (".bashrc", "") ("a.d/file", "") ("..x", "")
+#> .PNG archive.tar a/b.txt
+#> ["/", "usr", "lib", "x"] a/c /a ../..
+#> true /a/c ../b/c .
+#> true false

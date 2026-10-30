@@ -1,0 +1,189 @@
+# Container types beyond list and map, like Python's collections.
+#
+#     import collections
+#     fn main():
+#         var c = collections.counter(&"mississippi".chars())
+#         print(c.most_common(2))                  # [('i', 4), ('s', 4)]
+#         var d: collections.Deque[int] = collections.Deque.new()
+#         d.push_back(1)
+#         d.push_front(0)
+#         print(d.pop_back(), d.pop_front())       # Some(1) Some(0)
+#
+# Counter counts hashable items; Deque adds and removes at both ends in O(1)
+# (amortized); group_by and chunks group a list's items.
+
+# ---- Counter ----
+
+# Counts how many times each key was added, like Python's Counter.
+struct Counter[K]:
+    counts: map[K, int]
+
+    fn new() -> Counter[K]:
+        return Counter({})
+
+    # Adds n to k's count.
+    fn add(mut self, k: K, n: int):
+        if self.counts.contains(k):
+            self.counts[k] += n
+        else:
+            self.counts[k] = n
+
+    fn add_all(mut self, xs: &list[K]):
+        for x in xs:
+            self.add(x.clone(), 1)
+
+    # k's count, 0 when it was never added.
+    fn get(self, k: K) -> int:
+        return self.counts.get_or(k, 0)
+
+    fn len(self) -> int:
+        return len(self.counts)
+
+    # The sum of every count.
+    fn total(self) -> int:
+        var t = 0
+        for _, n in self.counts.items():
+            t += n
+        return t
+
+    # The n highest counts, highest first; ties keep the order items were first seen.
+    fn most_common(self, n: int) -> list[(K, int)]:
+        var all: list[(K, int)] = []
+        for k, c in self.counts.items():
+            all.push((k.clone(), c))
+        all.sort_by(fn(p) => -p.1)
+        all.truncate(n)
+        return all
+
+    # Every item repeated as many times as its count.
+    fn elements(self) -> list[K]:
+        var out: list[K] = []
+        for k, c in self.counts.items():
+            for _ in 0..c:
+                out.push(k.clone())
+        return out
+
+    fn to_map(self) -> map[K, int]:
+        return self.counts.clone()
+
+# A Counter of the items in a list.
+fn counter[K](xs: &list[K]) -> Counter[K]:
+    var c: Counter[K] = Counter.new()
+    c.add_all(xs)
+    return c
+
+# ---- Deque ----
+
+# Two stacks back to back: `front` holds the front items reversed.
+struct Deque[T]:
+    front: list[T]
+    back: list[T]
+
+    fn new() -> Deque[T]:
+        return Deque([], [])
+
+    fn from_list(xs: list[T]) -> Deque[T]:
+        return Deque([], xs)
+
+    fn len(self) -> int:
+        return len(self.front) + len(self.back)
+
+    fn is_empty(self) -> bool:
+        return len(self.front) == 0 and len(self.back) == 0
+
+    fn push_back(mut self, x: T):
+        self.back.push(x)
+
+    fn push_front(mut self, x: T):
+        self.front.push(x)
+
+    fn pop_back(mut self) -> Option[T]:
+        if len(self.back) == 0:
+            self._balance(true)
+        if len(self.back) == 0:
+            return None
+        return Some(self.back.pop())
+
+    fn pop_front(mut self) -> Option[T]:
+        if len(self.front) == 0:
+            self._balance(false)
+        if len(self.front) == 0:
+            return None
+        return Some(self.front.pop())
+
+    # When one side runs empty, splits the items so each side holds about half;
+    # a run of pops from one end then costs O(1) per item on average.
+    fn _balance(mut self, to_back: bool):
+        # The items in deque order, front to back.
+        var order: list[T] = []
+        if to_back:
+            while len(self.front) > 0:
+                order.push(self.front.pop())
+        else:
+            order = take(&mut self.back)
+        let m = len(order)
+        let h = m / 2 if to_back else m - m / 2
+        var head: list[T] = []
+        var tail: list[T] = []
+        var i = 0
+        for x in order:
+            if i < h:
+                head.push(x)
+            else:
+                tail.push(x)
+            i += 1
+        head.reverse()
+        self.front = head
+        self.back = tail
+
+    # The item at position i from the front.
+    fn at(self, i: int) -> T:
+        let f = len(self.front)
+        if i < f:
+            return self.front[f - 1 - i].clone()
+        return self.back[i - f].clone()
+
+    fn to_list(self) -> list[T]:
+        var out: list[T] = []
+        var i = len(self.front) - 1
+        while i >= 0:
+            out.push(self.front[i].clone())
+            i -= 1
+        for x in self.back:
+            out.push(x.clone())
+        return out
+
+    fn clear(mut self):
+        self.front.clear()
+        self.back.clear()
+
+# ---- grouping ----
+
+# Runs of consecutive items with the same key, like itertools.groupby.
+fn group_by[T, K: Eq](xs: &list[T], key: fn(T) -> K) -> list[(K, list[T])]:
+    var out: list[(K, list[T])] = []
+    var cur: list[T] = []
+    var have = false
+    var last: Option[K] = None
+    for x in xs:
+        let k = key(x.clone())
+        if have and last.clone().unwrap() != k:
+            out.push((take(&mut last).unwrap(), take(&mut cur)))
+        last = Some(k)
+        have = true
+        cur.push(x.clone())
+    if have:
+        out.push((take(&mut last).unwrap(), cur))
+    return out
+
+# Items in lists of n (the last may be shorter).
+fn chunks[T](xs: &list[T], n: int) -> list[list[T]]:
+    var out: list[list[T]] = []
+    var cur: list[T] = []
+    for x in xs:
+        cur.push(x.clone())
+        if len(cur) == n:
+            out.push(take(&mut cur))
+    if len(cur) > 0:
+        out.push(cur)
+    return out

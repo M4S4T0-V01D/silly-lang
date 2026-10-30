@@ -1,0 +1,1141 @@
+# Regular expressions, like Python's re.
+#
+#     import re
+#     fn main():
+#         let date = re.compile("(?P<y>\\d{4})-(\\d\\d)-(\\d\\d)").unwrap()
+#         match date.search("due 2026-10-30!"):
+#             case Some(m): print(m.group(0), m.named("y"), m.group(2))   # 2026-10-30 2026 10
+#             case None: print("no date")
+#         print(re.sub("\\s+", " ", "a   b \t c"))                       # a b c
+#         print(re.find_all("[a-z]+", "one 2 three"))                     # ["one", "three"]
+#         print(re.split(",\\s*", "a, b,c"))                              # ["a", "b", "c"]
+#
+# The syntax is Python's: . ^ $ * + ? {m,n} (lazy with a trailing ?), [...] sets,
+# \d \w \s \D \W \S \b \B \A \Z, (...) groups, (?:...), (?P<name>...) or (?<name>...),
+# \1 and (?P=name) backreferences, (?=...) (?!...) (?<=...) (?<!...) lookaround
+# (lookbehind must have a fixed width), and the flags (?i) (?m) (?s), also scoped
+# as (?i:...). Matching works on characters, positions are byte offsets.
+# The engine backtracks, so a pattern like (a*)*b can take exponential time.
+
+const IGNORECASE: int = 1
+const MULTILINE: int = 2
+const DOTALL: int = 4
+
+# Assertion kinds.
+const _STR_START: int = 0
+const _LINE_START: int = 1
+const _STR_END: int = 2       # the end, or before a final newline
+const _LINE_END: int = 3
+const _ABS_END: int = 4
+const _WORD_B: int = 5
+const _NOT_WORD_B: int = 6
+
+# Set items below zero stand for the shorthand classes.
+const _DIGIT: int = -1
+const _WORD: int = -2
+const _SPACE: int = -3
+const _NOT_DIGIT: int = -4
+const _NOT_WORD: int = -5
+const _NOT_SPACE: int = -6
+
+const _MAX_REPEAT: int = 1000
+
+struct _Set:
+    items: list[(int, int)]
+    negate: bool
+
+enum _Node:
+    Lit(int, bool)                  # code point (lower-cased when folding), fold
+    Dot(bool)                       # matches newline too
+    Set(int, bool)                  # index into sets, fold
+    Assert(int)
+    Group(int, int)                 # capture number (-1: none), child
+    Cat(list[int])
+    Alt(list[int])
+    Rep(int, int, int, bool)        # child, min, max (-1: unbounded), greedy
+    Ref(int, bool)                  # group number, fold
+    Look(int, bool, bool)           # child, behind, negate
+    Empty
+
+enum _Op:
+    Char(int, bool)
+    Any(bool)
+    Class(int, bool)
+    Split(int, int)                 # try the first target, then the second
+    Jmp(int)
+    Save(int)
+    Check(int, int)                 # assertion kind (unused second field)
+    Backref(int, bool)
+    Look(int, bool, int)            # ops to skip, negate, behind width (-1: ahead)
+    Mark(int)                       # slot = position
+    Progress(int)                   # leave the loop if the position didn't move since Mark
+    Done
+
+enum _Bt:
+    Branch(int, int)                # pc, position
+    Restore(int, int)               # slot, old value
+
+# ---- characters ----
+
+fn _lower(cp: int) -> int:
+    if cp < 128:
+        return cp + 32 if cp >= 65 and cp <= 90 else cp
+    return ord(chr(cp).lower())
+
+fn _upper(cp: int) -> int:
+    if cp < 128:
+        return cp - 32 if cp >= 97 and cp <= 122 else cp
+    return ord(chr(cp).upper())
+
+# The code point at byte i and its length in bytes.
+fn _cp(b: &list[u8], i: int) -> (int, int):
+    let c = b[i] as int
+    if c < 0x80:
+        return (c, 1)
+    var n = 1
+    var v = c
+    if c >= 0xF0:
+        n = 4
+        v = c & 7
+    elif c >= 0xE0:
+        n = 3
+        v = c & 15
+    elif c >= 0xC0:
+        n = 2
+        v = c & 31
+    else:
+        return (c, 1)
+    if i + n > len(b):
+        return (c, 1)
+    for k in 1..n:
+        v = (v << 6) | (b[i + k] as int & 63)
+    return (v, n)
+
+# The start of the code point before byte i.
+fn _back(b: &list[u8], i: int) -> int:
+    var j = i - 1
+    while j > 0 and (b[j] & 0xC0) == 0x80:
+        j -= 1
+    return j
+
+fn _is_word(cp: int) -> bool:
+    if cp < 128:
+        return (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122) or cp == 95
+    return chr(cp).is_alnum()
+
+fn _is_digit(cp: int) -> bool:
+    return cp >= 48 and cp <= 57
+
+fn _is_space(cp: int) -> bool:
+    return cp == 32 or (cp >= 9 and cp <= 13) or (cp >= 128 and chr(cp).is_space())
+
+fn _word_before(b: &list[u8], i: int) -> bool:
+    if i == 0:
+        return false
+    let (cp, _) = _cp(b, _back(b, i))
+    return _is_word(cp)
+
+fn _word_at(b: &list[u8], i: int) -> bool:
+    if i >= len(b):
+        return false
+    let (cp, _) = _cp(b, i)
+    return _is_word(cp)
+
+fn _in_items(set: &_Set, cp: int) -> bool:
+    for (lo, hi) in set.items:
+        if lo >= 0:
+            if cp >= lo and cp <= hi:
+                return true
+        elif lo == _DIGIT:
+            if _is_digit(cp):
+                return true
+        elif lo == _WORD:
+            if _is_word(cp):
+                return true
+        elif lo == _SPACE:
+            if _is_space(cp):
+                return true
+        elif lo == _NOT_DIGIT:
+            if not _is_digit(cp):
+                return true
+        elif lo == _NOT_WORD:
+            if not _is_word(cp):
+                return true
+        elif lo == _NOT_SPACE:
+            if not _is_space(cp):
+                return true
+    return false
+
+fn _in_set(set: &_Set, cp: int, fold: bool) -> bool:
+    var hit = _in_items(set, cp)
+    if not hit and fold:
+        hit = _in_items(set, _lower(cp)) or _in_items(set, _upper(cp))
+    return hit != set.negate
+
+# ---- parsing ----
+
+struct _Parser:
+    p: list[char]
+    pos: int
+    flags: int
+    nodes: list[_Node]
+    sets: list[_Set]
+    ngroups: int
+    names: map[str, int]
+
+    fn fail(self, msg: str) -> str:
+        return "re: " + msg + " at position " + str(self.pos)
+
+    fn more(self) -> bool:
+        return self.pos < len(self.p)
+
+    fn peek(self) -> char:
+        return self.p[self.pos]
+
+    fn eat(mut self, c: char) -> bool:
+        if self.pos < len(self.p) and self.p[self.pos] == c:
+            self.pos += 1
+            return true
+        return false
+
+    fn add(mut self, n: _Node) -> int:
+        self.nodes.push(n)
+        return len(self.nodes) - 1
+
+    fn fold(self) -> bool:
+        return (self.flags & IGNORECASE) != 0
+
+    fn alt(mut self) -> Result[int, str]:
+        var alts: list[int] = []
+        let saved = self.flags
+        loop:
+            match self.cat():
+                case Ok(n): alts.push(n)
+                case Err(e): return Err(e)
+            if not self.eat('|'):
+                break
+        self.flags = saved
+        if len(alts) == 1:
+            return Ok(alts[0])
+        return Ok(self.add(_Node.Alt(alts)))
+
+    fn cat(mut self) -> Result[int, str]:
+        var items: list[int] = []
+        while self.more() and self.peek() != '|' and self.peek() != ')':
+            match self.repeat():
+                case Ok(n):
+                    if n >= 0:
+                        items.push(n)
+                case Err(e): return Err(e)
+        if len(items) == 1:
+            return Ok(items[0])
+        if len(items) == 0:
+            return Ok(self.add(_Node.Empty))
+        return Ok(self.add(_Node.Cat(items)))
+
+    # An atom and any quantifier after it; -1 for a bare flag group like (?i).
+    fn repeat(mut self) -> Result[int, str]:
+        let start = self.pos
+        var atom = -1
+        match self.atom():
+            case Ok(n): atom = n
+            case Err(e): return Err(e)
+        if atom < 0:
+            return Ok(-1)
+        if not self.more():
+            return Ok(atom)
+        var lo = 0
+        var hi = -1
+        let c = self.peek()
+        if c == '*':
+            self.pos += 1
+        elif c == '+':
+            self.pos += 1
+            lo = 1
+        elif c == '?':
+            self.pos += 1
+            hi = 1
+        elif c == '{':
+            match self.braces():
+                case Some((a, b)):
+                    lo = a
+                    hi = b
+                case None:
+                    return Ok(atom)
+            if lo > _MAX_REPEAT or hi > _MAX_REPEAT:
+                return Err(self.fail("repeat count above " + str(_MAX_REPEAT)))
+            if hi >= 0 and hi < lo:
+                return Err(self.fail("min repeat greater than max repeat"))
+        else:
+            return Ok(atom)
+        match self.nodes[atom]:
+            case Assert(_):
+                self.pos = start
+                return Err(self.fail("nothing to repeat"))
+            case Look(_, _, _):
+                self.pos = start
+                return Err(self.fail("nothing to repeat"))
+            case _: pass
+        let greedy = not self.eat('?')
+        if self.more() and (self.peek() == '*' or self.peek() == '+' or self.peek() == '?' or self.peek() == '{'):
+            if self.peek() != '{' or self.braces_ahead():
+                return Err(self.fail("multiple repeat"))
+        return Ok(self.add(_Node.Rep(atom, lo, hi, greedy)))
+
+    fn braces_ahead(mut self) -> bool:
+        let save = self.pos
+        let ok = self.braces().is_some()
+        self.pos = save
+        return ok
+
+    # {m}, {m,}, {,n} or {m,n}; None (with nothing consumed) when it isn't one.
+    fn braces(mut self) -> Option[(int, int)]:
+        let save = self.pos
+        self.pos += 1
+        let a = self.number()
+        var lo = 0 if a < 0 else a
+        var hi = lo
+        if self.eat(','):
+            let b = self.number()
+            hi = b
+        elif a < 0:
+            self.pos = save
+            return None
+        if not self.eat('}'):
+            self.pos = save
+            return None
+        return Some((lo, hi))
+
+    fn number(mut self) -> int:
+        var n = -1
+        while self.more() and self.peek().is_digit():
+            n = (0 if n < 0 else n * 10) + (ord(self.peek()) - 48)
+            self.pos += 1
+            if n > 100000:
+                n = 100000
+        return n
+
+    fn lit(mut self, cp: int) -> int:
+        let f = self.fold()
+        return self.add(_Node.Lit(_lower(cp) if f else cp, f))
+
+    fn atom(mut self) -> Result[int, str]:
+        let c = self.peek()
+        self.pos += 1
+        if c == '.':
+            return Ok(self.add(_Node.Dot((self.flags & DOTALL) != 0)))
+        if c == '^':
+            return Ok(self.add(_Node.Assert(_LINE_START if (self.flags & MULTILINE) != 0 else _STR_START)))
+        if c == '$':
+            return Ok(self.add(_Node.Assert(_LINE_END if (self.flags & MULTILINE) != 0 else _STR_END)))
+        if c == '[':
+            return self.set()
+        if c == '(':
+            return self.group()
+        if c == '\\':
+            return self.escape()
+        if c == '*' or c == '+' or c == '?':
+            self.pos -= 1
+            return Err(self.fail("nothing to repeat"))
+        if c == '{' and self.pos == 1:
+            self.pos -= 1
+            if self.braces_ahead():
+                return Err(self.fail("nothing to repeat"))
+            self.pos += 1
+        return Ok(self.lit(ord(c)))
+
+    fn hex(mut self, digits: int) -> Result[int, str]:
+        var v = 0
+        for _ in 0..digits:
+            if not self.more():
+                return Err(self.fail("incomplete escape"))
+            let d = self.peek()
+            var x = -1
+            if d.is_digit():
+                x = ord(d) - 48
+            elif d >= 'a' and d <= 'f':
+                x = ord(d) - 87
+            elif d >= 'A' and d <= 'F':
+                x = ord(d) - 55
+            if x < 0:
+                return Err(self.fail("bad hex escape"))
+            v = v * 16 + x
+            self.pos += 1
+        return Ok(v)
+
+    # A character escape usable both inside and outside sets: its code point,
+    # a negative shorthand class, or an error.
+    fn char_escape(mut self, in_set: bool) -> Result[int, str]:
+        if not self.more():
+            return Err(self.fail("bad escape (end of pattern)"))
+        let c = self.peek()
+        self.pos += 1
+        if c == 'd': return Ok(_DIGIT)
+        if c == 'w': return Ok(_WORD)
+        if c == 's': return Ok(_SPACE)
+        if c == 'D': return Ok(_NOT_DIGIT)
+        if c == 'W': return Ok(_NOT_WORD)
+        if c == 'S': return Ok(_NOT_SPACE)
+        if c == 'n': return Ok(10)
+        if c == 't': return Ok(9)
+        if c == 'r': return Ok(13)
+        if c == 'f': return Ok(12)
+        if c == 'v': return Ok(11)
+        if c == 'a': return Ok(7)
+        if c == '0': return Ok(0)
+        if c == 'x': return self.hex(2)
+        if c == 'u': return self.hex(4)
+        if c == 'U': return self.hex(8)
+        if in_set and c == 'b':
+            return Ok(8)
+        if c.is_alnum():
+            self.pos -= 1
+            return Err(self.fail("bad escape \\" + str(c)))
+        return Ok(ord(c))
+
+    fn escape(mut self) -> Result[int, str]:
+        if self.more():
+            let c = self.peek()
+            if c == 'b' or c == 'B' or c == 'A' or c == 'Z':
+                self.pos += 1
+                let kind = _WORD_B if c == 'b' else (_NOT_WORD_B if c == 'B' else (_STR_START if c == 'A' else _ABS_END))
+                return Ok(self.add(_Node.Assert(kind)))
+            if c.is_digit() and c != '0':
+                let at = self.pos
+                let g = self.number()
+                if g >= self.ngroups:
+                    self.pos = at
+                    return Err(self.fail("invalid group reference " + str(g)))
+                return Ok(self.add(_Node.Ref(g, self.fold())))
+        match self.char_escape(false):
+            case Ok(v):
+                if v < 0:
+                    let i = len(self.sets)
+                    self.sets.push(_Set([(v, v)], false))
+                    return Ok(self.add(_Node.Set(i, self.fold())))
+                return Ok(self.lit(v))
+            case Err(e): return Err(e)
+
+    fn set(mut self) -> Result[int, str]:
+        let negate = self.eat('^')
+        var items: list[(int, int)] = []
+        var first = true
+        loop:
+            if not self.more():
+                return Err(self.fail("unterminated character set"))
+            let c = self.peek()
+            if c == ']' and not first:
+                self.pos += 1
+                break
+            first = false
+            self.pos += 1
+            var lo = ord(c)
+            if c == '\\':
+                match self.char_escape(true):
+                    case Ok(v): lo = v
+                    case Err(e): return Err(e)
+                if lo < 0:
+                    items.push((lo, lo))
+                    continue
+            if self.pos + 1 < len(self.p) and self.peek() == '-' and self.p[self.pos + 1] != ']':
+                self.pos += 1
+                let d = self.peek()
+                self.pos += 1
+                var hi = ord(d)
+                if d == '\\':
+                    match self.char_escape(true):
+                        case Ok(v): hi = v
+                        case Err(e): return Err(e)
+                    if hi < 0:
+                        return Err(self.fail("bad character range"))
+                if hi < lo:
+                    return Err(self.fail("bad character range"))
+                items.push((lo, hi))
+            else:
+                items.push((lo, lo))
+        let i = len(self.sets)
+        self.sets.push(_Set(items, negate))
+        return Ok(self.add(_Node.Set(i, self.fold())))
+
+    fn name(mut self, close: char) -> Result[str, str]:
+        var s = ""
+        while self.more() and self.peek() != close:
+            s += str(self.peek())
+            self.pos += 1
+        if not self.eat(close):
+            return Err(self.fail("missing " + str(close)))
+        var ok = s != ""
+        var first = true
+        for c in s.chars():
+            if not (c.is_alpha() or c == '_' or (not first and c.is_digit())):
+                ok = false
+            first = false
+        if not ok:
+            return Err(self.fail("bad group name '" + s + "'"))
+        return Ok(s)
+
+    fn body(mut self) -> Result[int, str]:
+        let r = self.alt()
+        if not self.eat(')'):
+            return Err(self.fail("missing ), unterminated subpattern"))
+        return r
+
+    fn group(mut self) -> Result[int, str]:
+        if not self.eat('?'):
+            let g = self.ngroups
+            self.ngroups += 1
+            match self.body():
+                case Ok(n): return Ok(self.add(_Node.Group(g, n)))
+                case Err(e): return Err(e)
+        if self.eat(':'):
+            return self.body()
+        if self.eat('='):
+            return self.look(false, false)
+        if self.eat('!'):
+            return self.look(false, true)
+        if self.eat('<'):
+            if self.eat('='):
+                return self.look(true, false)
+            if self.eat('!'):
+                return self.look(true, true)
+            return self.named()
+        if self.eat('P'):
+            if self.eat('<'):
+                return self.named()
+            if self.eat('='):
+                match self.name(')'):
+                    case Ok(nm):
+                        if not self.names.contains(nm):
+                            return Err(self.fail("unknown group name '" + nm + "'"))
+                        return Ok(self.add(_Node.Ref(self.names[nm], self.fold())))
+                    case Err(e): return Err(e)
+            return Err(self.fail("unknown extension ?P"))
+        # Flags: (?ims) for the rest of the enclosing group, (?ims:...) scoped.
+        var f = 0
+        while self.more() and (self.peek() == 'i' or self.peek() == 'm' or self.peek() == 's'):
+            let c = self.peek()
+            f = f | (IGNORECASE if c == 'i' else (MULTILINE if c == 'm' else DOTALL))
+            self.pos += 1
+        if f == 0:
+            return Err(self.fail("unknown extension"))
+        if self.eat(')'):
+            self.flags = self.flags | f
+            return Ok(-1)
+        if self.eat(':'):
+            let saved = self.flags
+            self.flags = self.flags | f
+            let r = self.body()
+            self.flags = saved
+            return r
+        return Err(self.fail("missing : or ) after flags"))
+
+    fn named(mut self) -> Result[int, str]:
+        match self.name('>'):
+            case Ok(nm):
+                if self.names.contains(nm):
+                    return Err(self.fail("redefinition of group name '" + nm + "'"))
+                let g = self.ngroups
+                self.ngroups += 1
+                self.names[nm] = g
+                match self.body():
+                    case Ok(n): return Ok(self.add(_Node.Group(g, n)))
+                    case Err(e): return Err(e)
+            case Err(e): return Err(e)
+
+    fn look(mut self, behind: bool, negate: bool) -> Result[int, str]:
+        match self.body():
+            case Ok(n): return Ok(self.add(_Node.Look(n, behind, negate)))
+            case Err(e): return Err(e)
+
+# ---- compiling ----
+
+struct _Emitter:
+    nodes: list[_Node]
+    prog: list[_Op]
+    nslots: int
+
+    fn op(mut self, o: _Op) -> int:
+        self.prog.push(o)
+        return len(self.prog) - 1
+
+    # The fixed width of a node in characters, -1 when it varies.
+    fn width(self, n: int) -> int:
+        match self.nodes[n]:
+            case Lit(_, _): return 1
+            case Dot(_): return 1
+            case Set(_, _): return 1
+            case Assert(_): return 0
+            case Empty: return 0
+            case Look(_, _, _): return 0
+            case Ref(_, _): return -1
+            case Group(_, c): return self.width(c)
+            case Rep(c, lo, hi, _):
+                let w = self.width(c)
+                if w < 0 or lo != hi:
+                    return -1
+                return w * lo
+            case Cat(xs):
+                var t = 0
+                for x in xs:
+                    let w = self.width(x)
+                    if w < 0:
+                        return -1
+                    t += w
+                return t
+            case Alt(xs):
+                var w0 = -2
+                for x in xs:
+                    let w = self.width(x)
+                    if w < 0 or (w0 != -2 and w != w0):
+                        return -1
+                    w0 = w
+                return w0
+
+    fn emit(mut self, n: int) -> Result[bool, str]:
+        let node = self.nodes[n].clone()
+        match node:
+            case Lit(c, f): self.op(_Op.Char(c, f))
+            case Dot(all): self.op(_Op.Any(all))
+            case Set(i, f): self.op(_Op.Class(i, f))
+            case Assert(k): self.op(_Op.Check(k, 0))
+            case Empty: pass
+            case Ref(g, f): self.op(_Op.Backref(g, f))
+            case Group(g, c):
+                if g >= 0:
+                    self.op(_Op.Save(2 * g))
+                match self.emit(c):
+                    case Err(e): return Err(e)
+                    case Ok(_): pass
+                if g >= 0:
+                    self.op(_Op.Save(2 * g + 1))
+            case Cat(xs):
+                for x in xs:
+                    match self.emit(x):
+                        case Err(e): return Err(e)
+                        case Ok(_): pass
+            case Alt(xs):
+                var jumps: list[int] = []
+                for i in 0..len(xs):
+                    if i < len(xs) - 1:
+                        let split = self.op(_Op.Split(0, 0))
+                        match self.emit(xs[i]):
+                            case Err(e): return Err(e)
+                            case Ok(_): pass
+                        jumps.push(self.op(_Op.Jmp(0)))
+                        self.prog[split] = _Op.Split(split + 1, len(self.prog))
+                    else:
+                        match self.emit(xs[i]):
+                            case Err(e): return Err(e)
+                            case Ok(_): pass
+                let end = len(self.prog)
+                for j in jumps:
+                    self.prog[j] = _Op.Jmp(end)
+            case Look(c, behind, negate):
+                var w = -1
+                if behind:
+                    w = self.width(c)
+                    if w < 0:
+                        return Err("re: look-behind requires a fixed-width pattern")
+                let at = self.op(_Op.Look(0, negate, w))
+                match self.emit(c):
+                    case Err(e): return Err(e)
+                    case Ok(_): pass
+                self.op(_Op.Done)
+                self.prog[at] = _Op.Look(len(self.prog) - at, negate, w)
+            case Rep(c, lo, hi, greedy):
+                for _ in 0..lo:
+                    match self.emit(c):
+                        case Err(e): return Err(e)
+                        case Ok(_): pass
+                if hi < 0:
+                    # loop: Split(body, out); body: Mark; c; Progress; Jmp loop
+                    let slot = self.nslots
+                    self.nslots += 1
+                    let top = self.op(_Op.Split(0, 0))
+                    self.op(_Op.Mark(slot))
+                    match self.emit(c):
+                        case Err(e): return Err(e)
+                        case Ok(_): pass
+                    self.op(_Op.Progress(slot))
+                    self.op(_Op.Jmp(top))
+                    let out = len(self.prog)
+                    self.prog[top] = _Op.Split(top + 1, out) if greedy else _Op.Split(out, top + 1)
+                else:
+                    var splits: list[int] = []
+                    for _ in lo..hi:
+                        splits.push(self.op(_Op.Split(0, 0)))
+                        match self.emit(c):
+                            case Err(e): return Err(e)
+                            case Ok(_): pass
+                    let out = len(self.prog)
+                    for s in splits:
+                        self.prog[s] = _Op.Split(s + 1, out) if greedy else _Op.Split(out, s + 1)
+        return Ok(true)
+
+# ---- matching ----
+
+# The result of a successful match. Positions are byte offsets into the text.
+struct Match:
+    spans: list[int]                # start and end of each group, -1 when it didn't take part
+    texts: list[str]
+    names: map[str, int]
+
+    # Group i's text; "" when the group didn't take part. Group 0 is the whole match.
+    fn group(self, i: int) -> str:
+        return self.texts[i].clone()
+
+    # Group i's text, None when it didn't take part.
+    fn get(self, i: int) -> Option[str]:
+        if self.spans[2 * i] < 0:
+            return None
+        return Some(self.texts[i].clone())
+
+    # A named group's text; "" when it didn't take part.
+    fn named(self, name: str) -> str:
+        if not self.names.contains(name):
+            panic("re: no group named '" + name + "'")
+        return self.texts[self.names[name]].clone()
+
+    fn start(self, i: int) -> int:
+        return self.spans[2 * i]
+
+    fn end(self, i: int) -> int:
+        return self.spans[2 * i + 1]
+
+    fn span(self) -> (int, int):
+        return (self.spans[0], self.spans[1])
+
+    # Groups 1 and up.
+    fn groups(self) -> list[str]:
+        var out: list[str] = []
+        for i in 1..len(self.texts):
+            out.push(self.texts[i].clone())
+        return out
+
+    # The named groups that took part, by name.
+    fn group_map(self) -> map[str, str]:
+        var out: map[str, str] = {}
+        for k, g in self.names.items():
+            if self.spans[2 * g] >= 0:
+                out[k.clone()] = self.texts[g].clone()
+        return out
+
+    fn len(self) -> int:
+        return len(self.texts)
+
+    # Expands \1, \g<1>, \g<name> and \\ in a replacement template.
+    fn expand(self, template: &str) -> str:
+        var out = ""
+        let t = template.chars()
+        var i = 0
+        while i < len(t):
+            let c = t[i]
+            if c == '\\' and i + 1 < len(t):
+                let d = t[i + 1]
+                if d.is_digit():
+                    var j = i + 1
+                    var g = 0
+                    while j < len(t) and t[j].is_digit() and j < i + 3:
+                        g = g * 10 + (ord(t[j]) - 48)
+                        j += 1
+                    if g >= len(self.texts):
+                        panic("re: invalid group reference " + str(g) + " in replacement")
+                    out += self.texts[g]
+                    i = j
+                    continue
+                if d == 'g' and i + 2 < len(t) and t[i + 2] == '<':
+                    var j = i + 3
+                    var nm = ""
+                    while j < len(t) and t[j] != '>':
+                        nm += str(t[j])
+                        j += 1
+                    var g = -1
+                    match nm.parse_int():
+                        case Some(v): g = v
+                        case None:
+                            if self.names.contains(nm):
+                                g = self.names[nm]
+                    if g < 0 or g >= len(self.texts):
+                        panic("re: unknown group '" + nm + "' in replacement")
+                    out += self.texts[g]
+                    i = j + 1
+                    continue
+                if d == 'n':
+                    out += "\n"
+                elif d == 't':
+                    out += "\t"
+                else:
+                    out += str(d)
+                i += 2
+                continue
+            out += str(c)
+            i += 1
+        return out
+
+# A compiled pattern.
+struct Regex:
+    pattern: str
+    prog: list[_Op]
+    sets: list[_Set]
+    ngroups: int
+    nslots: int
+    names: map[str, int]
+    anchored: bool
+
+    fn group_count(self) -> int:
+        return self.ngroups - 1
+
+    fn group_index(self, name: str) -> Option[int]:
+        return self.names.get(name)
+
+    # Runs the program from pc at byte sp. Returns the end position, or -1.
+    # With `nonempty`, a match that ends where it started doesn't count.
+    fn exec(self, b: &list[u8], pc0: int, sp0: int, slots: &mut list[int], nonempty: bool) -> int:
+        let n = len(b)
+        var stack: list[_Bt] = []
+        var pc = pc0
+        var sp = sp0
+        while true:
+            var ok = true
+            match self.prog[pc]:
+                case Char(c, fold):
+                    ok = false
+                    if sp < n:
+                        let (cp, l) = _cp(b, sp)
+                        if cp == c or (fold and _lower(cp) == c):
+                            sp += l
+                            pc += 1
+                            ok = true
+                case Any(all):
+                    ok = false
+                    if sp < n and (all or b[sp] != 10):
+                        let (_, l) = _cp(b, sp)
+                        sp += l
+                        pc += 1
+                        ok = true
+                case Class(i, fold):
+                    ok = false
+                    if sp < n:
+                        let (cp, l) = _cp(b, sp)
+                        if _in_set(&self.sets[i], cp, fold):
+                            sp += l
+                            pc += 1
+                            ok = true
+                case Split(a, alt):
+                    stack.push(_Bt.Branch(alt, sp))
+                    pc = a
+                case Jmp(t):
+                    pc = t
+                case Save(s):
+                    stack.push(_Bt.Restore(s, slots[s]))
+                    slots[s] = sp
+                    pc += 1
+                case Mark(s):
+                    stack.push(_Bt.Restore(s, slots[s]))
+                    slots[s] = sp
+                    pc += 1
+                case Progress(s):
+                    # An empty pass ends the loop (skipping its Jmp back), as in Python.
+                    pc += 1 if slots[s] != sp else 2
+                case Check(k, _):
+                    if k == _STR_START:
+                        ok = sp == 0
+                    elif k == _LINE_START:
+                        ok = sp == 0 or b[sp - 1] == 10
+                    elif k == _STR_END:
+                        ok = sp == n or (sp == n - 1 and b[sp] == 10)
+                    elif k == _LINE_END:
+                        ok = sp == n or b[sp] == 10
+                    elif k == _ABS_END:
+                        ok = sp == n
+                    elif k == _WORD_B:
+                        ok = _word_before(b, sp) != _word_at(b, sp)
+                    else:
+                        ok = _word_before(b, sp) == _word_at(b, sp)
+                    pc += 1
+                case Backref(g, fold):
+                    let s = slots[2 * g]
+                    let e = slots[2 * g + 1]
+                    ok = false
+                    if s >= 0 and e >= 0:
+                        var i = s
+                        var j = sp
+                        ok = true
+                        while i < e:
+                            if j >= n:
+                                ok = false
+                                break
+                            let (x, lx) = _cp(b, i)
+                            let (y, ly) = _cp(b, j)
+                            if x != y and not (fold and _lower(x) == _lower(y)):
+                                ok = false
+                                break
+                            i += lx
+                            j += ly
+                        if ok:
+                            sp = j
+                            pc += 1
+                case Look(skip, negate, w):
+                    var start = sp
+                    var can = true
+                    if w >= 0:
+                        for _ in 0..w:
+                            if start == 0:
+                                can = false
+                                break
+                            start = _back(b, start)
+                    var sub = slots.clone()
+                    var hit = false
+                    if can:
+                        let e = self.exec(b, pc + 1, start, &mut sub, false)
+                        hit = e >= 0 and (w < 0 or e == sp)
+                    ok = hit != negate
+                    if ok and not negate:
+                        for i in 0..len(sub):
+                            if sub[i] != slots[i]:
+                                stack.push(_Bt.Restore(i, slots[i]))
+                                slots[i] = sub[i]
+                    pc += skip
+                case Done:
+                    if nonempty and sp == sp0:
+                        ok = false
+                    else:
+                        return sp
+            if not ok:
+                var resumed = false
+                while len(stack) > 0:
+                    match stack.pop():
+                        case Branch(p, s):
+                            pc = p
+                            sp = s
+                            resumed = true
+                        case Restore(s, old):
+                            slots[s] = old
+                    if resumed:
+                        break
+                if not resumed:
+                    return -1
+        return -1
+
+    fn make_match(self, s: &str, slots: &list[int]) -> Match:
+        var spans: list[int] = []
+        var texts: list[str] = []
+        for g in 0..self.ngroups:
+            let a = slots[2 * g]
+            let e = slots[2 * g + 1]
+            if a >= 0 and e >= 0:
+                spans.push(a)
+                spans.push(e)
+                texts.push(s[a:e])
+            else:
+                spans.push(-1)
+                spans.push(-1)
+                texts.push("")
+        return Match(spans, texts, self.names.clone())
+
+    # The first match starting at byte `at` or later; with `nonempty`, an empty
+    # match exactly at `at` is skipped.
+    fn search_at(self, s: &str, b: &list[u8], at: int, nonempty: bool) -> Option[Match]:
+        let n = len(b)
+        var start = at
+        var slots: list[int] = []
+        while start <= n:
+            slots.clear()
+            for _ in 0..self.nslots:
+                slots.push(-1)
+            let e = self.exec(b, 0, start, &mut slots, nonempty and start == at)
+            if e >= 0:
+                slots[0] = start
+                slots[1] = e
+                return Some(self.make_match(s, &slots))
+            if self.anchored or start == n:
+                break
+            let (_, l) = _cp(b, start)
+            start += l
+        return None
+
+    # The first match anywhere in s.
+    fn search(self, s: &str) -> Option[Match]:
+        let b = s.bytes()
+        return self.search_at(s, &b, 0, false)
+
+    # The first match at or after byte offset pos.
+    fn search_from(self, s: &str, pos: int) -> Option[Match]:
+        let b = s.bytes()
+        if pos > len(b):
+            return None
+        return self.search_at(s, &b, pos, false)
+
+    # A match that starts at the beginning of s (Python's re.match).
+    fn match_start(self, s: &str) -> Option[Match]:
+        let b = s.bytes()
+        var slots: list[int] = []
+        for _ in 0..self.nslots:
+            slots.push(-1)
+        let e = self.exec(&b, 0, 0, &mut slots, false)
+        if e < 0:
+            return None
+        slots[0] = 0
+        slots[1] = e
+        return Some(self.make_match(s, &slots))
+
+    # A match of the whole of s.
+    fn fullmatch(self, s: &str) -> Option[Match]:
+        var prog = self.prog.clone()
+        let last = len(prog) - 1
+        prog[last] = _Op.Check(_ABS_END, 0)
+        prog.push(_Op.Done)
+        let r = Regex(self.pattern.clone(), prog, self.sets.clone(), self.ngroups, self.nslots, self.names.clone(), true)
+        return r.match_start(s)
+
+    fn is_match(self, s: &str) -> bool:
+        return self.search(s).is_some()
+
+    # Every non-overlapping match, left to right.
+    fn find_iter(self, s: &str) -> list[Match]:
+        let b = s.bytes()
+        var out: list[Match] = []
+        var pos = 0
+        var after_empty = false
+        while pos <= len(b):
+            match self.search_at(s, &b, pos, after_empty):
+                case Some(m):
+                    let (a, e) = m.span()
+                    after_empty = a == e
+                    pos = e
+                    out.push(m)
+                case None:
+                    break
+        return out
+
+    # The text of every match.
+    fn find_all(self, s: &str) -> list[str]:
+        var out: list[str] = []
+        for m in self.find_iter(s):
+            out.push(m.group(0))
+        return out
+
+    # Replaces every match with the template (\1, \g<name>), at most `count` when count > 0.
+    fn sub_n(self, s: &str, repl: &str, count: int) -> str:
+        var out = ""
+        var last = 0
+        var done = 0
+        for m in self.find_iter(s):
+            if count > 0 and done == count:
+                break
+            let (a, e) = m.span()
+            out += s[last:a]
+            out += m.expand(repl)
+            last = e
+            done += 1
+        return out + s[last:]
+
+    fn sub(self, s: &str, repl: &str) -> str:
+        return self.sub_n(s, repl, 0)
+
+    # Replaces every match with what f returns for it.
+    fn sub_fn(self, s: &str, f: fn(Match) -> str) -> str:
+        var out = ""
+        var last = 0
+        for m in self.find_iter(s):
+            let (a, e) = m.span()
+            out += s[last:a]
+            last = e
+            out += f(m.clone())
+        return out + s[last:]
+
+    # Splits around matches, at most `count` times when count > 0. Captured
+    # groups are included between the pieces, as in Python.
+    fn split_n(self, s: &str, count: int) -> list[str]:
+        var out: list[str] = []
+        var last = 0
+        var done = 0
+        for m in self.find_iter(s):
+            if count > 0 and done == count:
+                break
+            let (a, e) = m.span()
+            out.push(s[last:a])
+            for g in 1..m.len():
+                out.push(m.group(g))
+            last = e
+            done += 1
+        out.push(s[last:])
+        return out
+
+    fn split(self, s: &str) -> list[str]:
+        return self.split_n(s, 0)
+
+# Like compile, with IGNORECASE, MULTILINE or DOTALL or-ed together.
+fn compile_flags(pattern: &str, flags: int) -> Result[Regex, str]:
+    var p = _Parser(pattern.chars(), 0, flags, [], [], 1, {})
+    var root = 0
+    match p.alt():
+        case Ok(n): root = n
+        case Err(e): return Err(e)
+    if p.more():
+        return Err(p.fail("unbalanced parenthesis"))
+    var em = _Emitter(take(&mut p.nodes), [], 2 * p.ngroups)
+    match em.emit(root):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    em.op(_Op.Done)
+    var anchored = false
+    if len(em.prog) > 0:
+        match em.prog[0]:
+            case Check(k, _): anchored = k == _STR_START
+            case _: pass
+    return Ok(Regex(pattern.clone(), take(&mut em.prog), take(&mut p.sets), p.ngroups, em.nslots, take(&mut p.names), anchored))
+
+# A Regex for pattern, or what's wrong with it.
+fn compile(pattern: &str) -> Result[Regex, str]:
+    return compile_flags(pattern, 0)
+
+fn _must(pattern: &str) -> Regex:
+    match compile(pattern):
+        case Ok(r): return r
+        case Err(e):
+            panic(e)
+
+# One-shot helpers that compile the pattern each time and panic on a bad one.
+
+# The first match of pattern anywhere in s.
+fn search(pattern: &str, s: &str) -> Option[Match]:
+    return _must(pattern).search(s)
+
+# A match of pattern at the start of s (Python's re.match).
+fn match_start(pattern: &str, s: &str) -> Option[Match]:
+    return _must(pattern).match_start(s)
+
+# A match of pattern covering all of s.
+fn fullmatch(pattern: &str, s: &str) -> Option[Match]:
+    return _must(pattern).fullmatch(s)
+
+# Whether pattern matches anywhere in s.
+fn is_match(pattern: &str, s: &str) -> bool:
+    return _must(pattern).is_match(s)
+
+# The text of every non-overlapping match in s.
+fn find_all(pattern: &str, s: &str) -> list[str]:
+    return _must(pattern).find_all(s)
+
+# Every non-overlapping match in s, as Match values.
+fn find_iter(pattern: &str, s: &str) -> list[Match]:
+    return _must(pattern).find_iter(s)
+
+# s with every match replaced by repl (\1 or \g<name> insert groups).
+fn sub(pattern: &str, repl: &str, s: &str) -> str:
+    return _must(pattern).sub(s, repl)
+
+# The parts of s between matches.
+fn split(pattern: &str, s: &str) -> list[str]:
+    return _must(pattern).split(s)
+
+# The text with every regex metacharacter backslash-escaped.
+fn escape(s: &str) -> str:
+    var out = ""
+    for c in s.chars():
+        let cs = str(c)
+        if ".^$*+?{}[]\\|()".contains(cs):
+            out += "\\"
+        out += str(c)
+    return out

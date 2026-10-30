@@ -1,0 +1,84 @@
+# A tour of the ui module. Run with: silly run examples/ui_demo.silly
+
+import gfx
+import ui
+
+fn main():
+    var app = ui.app("Silly UI", 760, 560)
+    var name = ""
+    var pin = ""
+    var notify = true
+    var dark = false
+    var size = 1
+    var volume = 0.6
+    var count = 3
+    var color = 0
+    var fruit = 2
+    var tab = 0
+    var log: list[str] = []
+    let colors = ["Red", "Green", "Blue", "Purple"]
+    let fruits = ["Apple", "Banana", "Cherry", "Grape", "Lemon", "Mango", "Peach", "Pear"]
+    let tabs = ["General", "Lists", "About"]
+    while app.frame():
+        app.title("Settings")
+        if app.tabs(&tabs, &mut tab):
+            log.push(f"tab {tabs[tab]}")
+        if tab == 0:
+            app.grid(2)
+            app.group("Profile")
+            app.entry("Your name", &mut name)
+            app.tooltip("Shown on your profile")
+            if app.entered():
+                log.push(f"hello {name}")
+            app.secret_entry("PIN", &mut pin)
+            app.checkbox("Email notifications", &mut notify)
+            if app.switch("Dark theme", &mut dark):
+                if dark:
+                    app.set_theme(ui.dark())
+                else:
+                    app.set_theme(ui.light())
+            app.end()
+            app.group("Output")
+            app.radio("Small", &mut size, 0)
+            app.radio("Medium", &mut size, 1)
+            app.radio("Large", &mut size, 2)
+            app.slider("Volume", &mut volume, 0.0, 1.0)
+            app.progress(volume)
+            app.row()
+            app.label("Copies")
+            app.spinbox("Copies", &mut count, 1, 99, 1)
+            app.end()
+            app.end()
+            app.end()
+            app.row()
+            app.label("Colour")
+            if app.combobox("Colour", &colors, &mut color):
+                log.push(f"colour {colors[color]}")
+            app.end()
+        elif tab == 1:
+            app.label("Pick a fruit:")
+            if app.listbox("Fruit", &fruits, &mut fruit, 5):
+                log.push(f"fruit {fruits[fruit]}")
+            app.caption(f"{len(fruits)} fruits")
+        else:
+            app.heading("About")
+            app.paragraph("This window is drawn by the ui module, which is written in Silly on top of gfx. Every widget is plain Silly code: no toolkit, no C beyond the pixel layer.")
+            app.code("import ui")
+        app.separator()
+        app.row()
+        if app.primary_button("Save"):
+            log.push(f"saved {name} size={size} copies={count}")
+        if app.button("Reset"):
+            name = ""
+            count = 3
+            volume = 0.6
+        app.set_enabled(false)
+        app.button("Disabled")
+        app.set_enabled(true)
+        if app.button("Quit"):
+            app.close()
+        app.end()
+        app.scroll("log", 80)
+        for line in log:
+            app.code(line)
+        app.end()

@@ -1,0 +1,546 @@
+# Reading and writing JSON.
+#
+#     import json
+#     fn main():
+#         let v = json.parse("{\"name\": \"silly\", \"tags\": [1, 2.5, true]}").unwrap()
+#         print(v.get("name").unwrap().as_str())        # Some("silly")
+#         print(v.find("tags.1").unwrap().as_float())    # Some(2.5)
+#         var o = json.object()
+#         o.set("ok", json.Value.Bool(true))
+#         o.set("list", json.array_of_ints(&[1, 2, 3]))
+#         print(json.dump(&o))                          # {"ok":true,"list":[1,2,3]}
+#         print(json.pretty(&o, 2))
+#
+# Numbers without a fraction or exponent become Int when they fit in 64 bits,
+# the rest Float. Objects keep their keys in the order they appeared.
+
+# A JSON value: null, a bool, a number, a string, an array or an object.
+enum Value:
+    Null
+    Bool(bool)
+    Int(int)
+    Float(f64)
+    Str(str)
+    Arr(list[Value])
+    Obj(map[str, Value])
+
+    # "null", "bool", "int", "float", "string", "array" or "object".
+    fn type_name(self) -> str:
+        match self:
+            case Null: return "null"
+            case Bool(_): return "bool"
+            case Int(_): return "int"
+            case Float(_): return "float"
+            case Str(_): return "string"
+            case Arr(_): return "array"
+            case Obj(_): return "object"
+
+    fn is_null(self) -> bool:
+        return self is Null
+
+    fn as_bool(self) -> Option[bool]:
+        match self:
+            case Bool(b): return Some(b)
+            case _: return None
+
+    # Int values, and Floats with no fractional part.
+    fn as_int(self) -> Option[int]:
+        match self:
+            case Int(i): return Some(i)
+            case Float(f):
+                if f == f.trunc() and f.abs() < 9.2e18:
+                    return Some(f as int)
+                return None
+            case _: return None
+
+    # Float and Int values as a float.
+    fn as_float(self) -> Option[f64]:
+        match self:
+            case Int(i): return Some(i as f64)
+            case Float(f): return Some(f)
+            case _: return None
+
+    fn as_str(self) -> Option[str]:
+        match self:
+            case Str(s): return Some(s.clone())
+            case _: return None
+
+    fn as_list(self) -> Option[list[Value]]:
+        match self:
+            case Arr(xs): return Some(xs.clone())
+            case _: return None
+
+    fn as_map(self) -> Option[map[str, Value]]:
+        match self:
+            case Obj(m): return Some(m.clone())
+            case _: return None
+
+    # The member `key` of an object (a copy); None for a missing key or a non-object.
+    fn get(self, key: &str) -> Option[Value]:
+        match self:
+            case Obj(m):
+                if m.contains(key):
+                    return Some(m[key].clone())
+                return None
+            case _: return None
+
+    # Element i of an array (a copy).
+    fn at(self, i: int) -> Option[Value]:
+        match self:
+            case Arr(xs):
+                if i >= 0 and i < len(xs):
+                    return Some(xs[i].clone())
+                return None
+            case _: return None
+
+    # Follows a dotted path of keys and indexes: v.find("users.0.name").
+    fn find(self, path: &str) -> Option[Value]:
+        var cur = self.clone()
+        for part in path.split("."):
+            var next: Option[Value] = None
+            if cur is Arr(_) and part.parse_int() is Some(i):
+                next = cur.at(i)
+            else:
+                next = cur.get(&part)
+            match next:
+                case Some(v): cur = v
+                case None: return None
+        return Some(cur)
+
+    fn has(self, key: &str) -> bool:
+        match self:
+            case Obj(m): return m.contains(key)
+            case _: return false
+
+    # The number of elements of an array or members of an object; 0 otherwise.
+    fn len(self) -> int:
+        match self:
+            case Arr(xs): return len(xs)
+            case Obj(m): return len(m)
+            case _: return 0
+
+    fn keys(self) -> list[str]:
+        match self:
+            case Obj(m): return m.keys()
+            case _: return []
+
+    # Sets an object member (panics on a non-object).
+    fn set(mut self, key: str, v: Value):
+        if not (self is Obj(_)):
+            panic("json: set() on a " + self.type_name())
+        var m = _members(take(&mut self))
+        m[key] = v
+        self = Value.Obj(m)
+
+    # Appends to an array (panics on a non-array).
+    fn push(mut self, v: Value):
+        if not (self is Arr(_)):
+            panic("json: push() on a " + self.type_name())
+        var xs = _elements(take(&mut self))
+        xs.push(v)
+        self = Value.Arr(xs)
+
+    fn remove(mut self, key: &str) -> Option[Value]:
+        if not (self is Obj(_)):
+            return None
+        var m = _members(take(&mut self))
+        let old = m.remove(key)
+        self = Value.Obj(m)
+        return old
+
+    fn to_str(self) -> str:
+        return dump(&self)
+
+fn _members(v: Value) -> map[str, Value]:
+    match v:
+        case Obj(m): return m
+        case _:
+            var m: map[str, Value] = {}
+            return m
+
+fn _elements(v: Value) -> list[Value]:
+    match v:
+        case Arr(xs): return xs
+        case _:
+            var xs: list[Value] = []
+            return xs
+
+# ---- building ----
+
+# An empty object.
+fn object() -> Value:
+    var m: map[str, Value] = {}
+    return Value.Obj(m)
+
+# An empty array.
+fn array() -> Value:
+    var xs: list[Value] = []
+    return Value.Arr(xs)
+
+# A string value.
+fn string(s: &str) -> Value:
+    return Value.Str(s.clone())
+
+# An array of the numbers in xs.
+fn array_of_ints(xs: &list[int]) -> Value:
+    var out: list[Value] = []
+    for x in xs:
+        out.push(Value.Int(x))
+    return Value.Arr(out)
+
+# An array of the numbers in xs.
+fn array_of_floats(xs: &list[f64]) -> Value:
+    var out: list[Value] = []
+    for x in xs:
+        out.push(Value.Float(x))
+    return Value.Arr(out)
+
+# An array of the strings in xs.
+fn array_of_strs(xs: &list[str]) -> Value:
+    var out: list[Value] = []
+    for x in xs:
+        out.push(Value.Str(x.clone()))
+    return Value.Arr(out)
+
+# ---- writing ----
+
+# Compact JSON text: no spaces or newlines.
+fn dump(v: &Value) -> str:
+    var out = ""
+    _write(v, &mut out, 0, 0)
+    return out
+
+# Indented JSON text, `indent` spaces per level.
+fn pretty(v: &Value, indent: int) -> str:
+    var out = ""
+    _write(v, &mut out, indent if indent > 0 else 1, 0)
+    return out
+
+# A string as a JSON string literal, with quotes and escapes.
+fn quote(s: &str) -> str:
+    var out = ""
+    _write_str(s, &mut out)
+    return out
+
+fn _newline(out: &mut str, indent: int, level: int):
+    out += "\n"
+    for _ in 0..indent * level:
+        out += " "
+
+fn _write(v: &Value, out: &mut str, indent: int, level: int):
+    match v:
+        case Null: out += "null"
+        case Bool(b): out += "true" if b else "false"
+        case Int(i): out += str(i)
+        case Float(f):
+            if f.is_nan() or f - f != 0.0:
+                out += "null"     # JSON has no NaN or infinity
+            else:
+                out += str(f)
+        case Str(s): _write_str(&s, &mut out)
+        case Arr(xs):
+            if len(xs) == 0:
+                out += "[]"
+                return
+            out += "["
+            for i in 0..len(xs):
+                if i > 0:
+                    out += ","
+                if indent > 0:
+                    _newline(&mut out, indent, level + 1)
+                _write(&xs[i], &mut out, indent, level + 1)
+            if indent > 0:
+                _newline(&mut out, indent, level)
+            out += "]"
+        case Obj(m):
+            if len(m) == 0:
+                out += "{}"
+                return
+            out += "{"
+            var first = true
+            for k, val in m.items():
+                if not first:
+                    out += ","
+                first = false
+                if indent > 0:
+                    _newline(&mut out, indent, level + 1)
+                _write_str(&k, &mut out)
+                out += ": " if indent > 0 else ":"
+                _write(&val, &mut out, indent, level + 1)
+            if indent > 0:
+                _newline(&mut out, indent, level)
+            out += "}"
+
+fn _write_str(s: &str, out: &mut str):
+    let hex = "0123456789abcdef"
+    out += "\""
+    var start = 0
+    var i = 0
+    for b in s.bytes():
+        let c = b as int
+        if c == 34 or c == 92 or c < 32:
+            out += s[start:i]
+            if c == 34:
+                out += "\\\""
+            elif c == 92:
+                out += "\\\\"
+            elif c == 10:
+                out += "\\n"
+            elif c == 9:
+                out += "\\t"
+            elif c == 13:
+                out += "\\r"
+            else:
+                out += "\\u00" + hex[c / 16:c / 16 + 1] + hex[c % 16:c % 16 + 1]
+            start = i + 1
+        i += 1
+    out += s[start:i]
+    out += "\""
+
+# ---- reading ----
+
+# Parses JSON text. Errors say what was wrong and where ("line 3 column 7").
+fn parse(text: &str) -> Result[Value, str]:
+    var p = _Parser(text.clone(), text.bytes(), 0, 0)
+    p.skip_ws()
+    let v = p.value()?
+    p.skip_ws()
+    if p.pos < len(p.b):
+        return Err(p.fail("extra text after the value"))
+    return Ok(v)
+
+struct _Parser:
+    src: str
+    b: list[u8]
+    pos: int
+    depth: int
+
+    fn fail(self, msg: str) -> str:
+        var line = 1
+        var col = 1
+        for i in 0..self.pos:
+            if i >= len(self.b):
+                break
+            if self.b[i] == 10:
+                line += 1
+                col = 1
+            else:
+                col += 1
+        return f"json: {msg} at line {line} column {col}"
+
+    fn peek(self) -> int:
+        if self.pos < len(self.b):
+            return self.b[self.pos] as int
+        return -1
+
+    fn skip_ws(mut self):
+        while self.pos < len(self.b):
+            let c = self.b[self.pos]
+            if c != 32 and c != 10 and c != 13 and c != 9:
+                return
+            self.pos += 1
+
+    fn word(mut self, w: str, v: Value) -> Result[Value, str]:
+        if self.pos + len(w) <= len(self.b) and self.src[self.pos:self.pos + len(w)] == w:
+            self.pos += len(w)
+            return Ok(v)
+        return Err(self.fail("unexpected character"))
+
+    fn value(mut self) -> Result[Value, str]:
+        let c = self.peek()
+        if c == -1:
+            return Err(self.fail("unexpected end of input"))
+        if c == 123:   # {
+            return self.object()
+        if c == 91:    # [
+            return self.array()
+        if c == 34:    # "
+            return Ok(Value.Str(self.string()?))
+        if c == 116:
+            return self.word("true", Value.Bool(true))
+        if c == 102:
+            return self.word("false", Value.Bool(false))
+        if c == 110:
+            return self.word("null", Value.Null)
+        if c == 45 or (c >= 48 and c <= 57):
+            return self.number()
+        return Err(self.fail("unexpected character"))
+
+    fn enter(mut self) -> Result[bool, str]:
+        self.depth += 1
+        if self.depth > 500:
+            return Err(self.fail("nesting too deep"))
+        self.pos += 1
+        self.skip_ws()
+        return Ok(true)
+
+    fn array(mut self) -> Result[Value, str]:
+        self.enter()?
+        var xs: list[Value] = []
+        if self.peek() == 93:
+            self.pos += 1
+            self.depth -= 1
+            return Ok(Value.Arr(xs))
+        while true:
+            xs.push(self.value()?)
+            self.skip_ws()
+            let c = self.peek()
+            if c == 44:
+                self.pos += 1
+                self.skip_ws()
+            elif c == 93:
+                self.pos += 1
+                break
+            else:
+                return Err(self.fail("expected ',' or ']'"))
+        self.depth -= 1
+        return Ok(Value.Arr(xs))
+
+    fn object(mut self) -> Result[Value, str]:
+        self.enter()?
+        var m: map[str, Value] = {}
+        if self.peek() == 125:
+            self.pos += 1
+            self.depth -= 1
+            return Ok(Value.Obj(m))
+        while true:
+            if self.peek() != 34:
+                return Err(self.fail("expected a string key"))
+            let k = self.string()?
+            self.skip_ws()
+            if self.peek() != 58:
+                return Err(self.fail("expected ':'"))
+            self.pos += 1
+            self.skip_ws()
+            m[k] = self.value()?
+            self.skip_ws()
+            let c = self.peek()
+            if c == 44:
+                self.pos += 1
+                self.skip_ws()
+            elif c == 125:
+                self.pos += 1
+                break
+            else:
+                return Err(self.fail("expected ',' or '}'"))
+        self.depth -= 1
+        return Ok(Value.Obj(m))
+
+    fn hex4(mut self) -> Result[int, str]:
+        if self.pos + 4 > len(self.b):
+            return Err(self.fail("bad \\u escape"))
+        var v = 0
+        for _ in 0..4:
+            let c = self.b[self.pos] as int
+            var d = -1
+            if c >= 48 and c <= 57:
+                d = c - 48
+            elif c >= 97 and c <= 102:
+                d = c - 87
+            elif c >= 65 and c <= 70:
+                d = c - 55
+            if d < 0:
+                return Err(self.fail("bad \\u escape"))
+            v = v * 16 + d
+            self.pos += 1
+        return Ok(v)
+
+    fn string(mut self) -> Result[str, str]:
+        self.pos += 1
+        var out = ""
+        var start = self.pos
+        while true:
+            if self.pos >= len(self.b):
+                return Err(self.fail("unterminated string"))
+            let c = self.b[self.pos] as int
+            if c == 34:
+                out += self.src[start:self.pos]
+                self.pos += 1
+                return Ok(out)
+            if c < 32:
+                return Err(self.fail("control character in string"))
+            if c != 92:
+                self.pos += 1
+                continue
+            out += self.src[start:self.pos]
+            self.pos += 1
+            let e = self.peek()
+            self.pos += 1
+            if e == 34:
+                out += "\""
+            elif e == 92:
+                out += "\\"
+            elif e == 47:
+                out += "/"
+            elif e == 98:
+                out += "\u{8}"
+            elif e == 102:
+                out += "\u{c}"
+            elif e == 110:
+                out += "\n"
+            elif e == 114:
+                out += "\r"
+            elif e == 116:
+                out += "\t"
+            elif e == 117:
+                var code = self.hex4()?
+                if code >= 0xD800 and code <= 0xDBFF:
+                    if self.peek() != 92 or self.pos + 1 >= len(self.b) or self.b[self.pos + 1] != 117:
+                        return Err(self.fail("unpaired surrogate"))
+                    self.pos += 2
+                    let lo = self.hex4()?
+                    if lo < 0xDC00 or lo > 0xDFFF:
+                        return Err(self.fail("unpaired surrogate"))
+                    code = 0x10000 + ((code - 0xD800) << 10) + (lo - 0xDC00)
+                elif code >= 0xDC00 and code <= 0xDFFF:
+                    return Err(self.fail("unpaired surrogate"))
+                out += str(chr(code))
+            else:
+                self.pos -= 1
+                return Err(self.fail("bad escape"))
+            start = self.pos
+
+    fn number(mut self) -> Result[Value, str]:
+        let start = self.pos
+        if self.peek() == 45:
+            self.pos += 1
+        let d0 = self.peek()
+        if d0 < 48 or d0 > 57:
+            return Err(self.fail("expected a digit"))
+        if d0 == 48:
+            self.pos += 1
+        else:
+            self.digits()
+        var is_float = false
+        if self.peek() == 46:
+            self.pos += 1
+            if self.digits() == 0:
+                return Err(self.fail("expected a digit"))
+            is_float = true
+        let e = self.peek()
+        if e == 101 or e == 69:
+            self.pos += 1
+            let sign = self.peek()
+            if sign == 43 or sign == 45:
+                self.pos += 1
+            if self.digits() == 0:
+                return Err(self.fail("expected a digit"))
+            is_float = true
+        let text = self.src[start:self.pos]
+        if not is_float:
+            match text.parse_int():
+                case Some(i): return Ok(Value.Int(i))
+                case None: pass   # too big: fall through to a float
+        match text.parse_float():
+            case Some(f): return Ok(Value.Float(f))
+            case None: return Err(self.fail("bad number"))
+
+    fn digits(mut self) -> int:
+        var n = 0
+        while true:
+            let c = self.peek()
+            if c < 48 or c > 57:
+                return n
+            self.pos += 1
+            n += 1
+        return n

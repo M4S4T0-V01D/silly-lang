@@ -1,0 +1,37 @@
+# itertools: chain, slices, accumulate, product, permutations, combinations
+
+import itertools as it
+fn main():
+    print(it.chain(&[[1, 2], [], [3]]))
+    print(it.repeat(&"x", 3), it.cycle(&[1, 2], 2))
+    print(it.islice(&[0, 1, 2, 3, 4, 5, 6], 1, 6, 2), it.islice(&[1, 2], 0, 99, 1))
+    print(it.accumulate(&[1, 2, 3, 4], fn(a, b) => a * b), it.sums(&[1, 2, 3]))
+    print(it.take_while(&[1, 4, 6, 4, 1], fn(x) => x < 5), it.drop_while(&[1, 4, 6, 4, 1], fn(x) => x < 5))
+    print(it.compress(&["a", "b", "c", "d"], &[true, false, true]), it.filter_false(&[1, 2, 3, 4], fn(x) => x % 2 == 0))
+    print(it.pairwise(&["a", "b", "c"]), it.windows(&[1, 2, 3, 4], 3), it.batched(&[1, 2, 3, 4, 5], 2))
+    print(it.zip_longest(&[1, 2, 3], &["a"], &0, &"-"))
+    print(it.unique(&[3, 1, 3, 2, 1]))
+    print(it.product(&[[0, 1], [5, 6]]), len(it.product_n(&[0, 1], 3)), it.product(&[[1], []]))
+    print(it.permutations(&[1, 2, 3], 2))
+    print(len(it.permutations_all(&[1, 2, 3, 4])), it.permutations(&[1], 2))
+    print(it.combinations(&["a", "b", "c", "d"], 2))
+    print(it.combinations(&[1, 2, 3], 0), it.combinations(&[1, 2], 3))
+    print(it.combinations_with_replacement(&["a", "b", "c"], 2))
+    print(it.powerset(&[1, 2, 3]))
+
+#> [1, 2, 3]
+#> ["x", "x", "x"] [1, 2, 1, 2]
+#> [1, 3, 5] [1, 2]
+#> [1, 2, 6, 24] [1, 3, 6]
+#> [1, 4] [6, 4, 1]
+#> ["a", "c"] [1, 3]
+#> [("a", "b"), ("b", "c")] [[1, 2, 3], [2, 3, 4]] [[1, 2], [3, 4], [5]]
+#> [(1, "a"), (2, "-"), (3, "-")]
+#> [3, 1, 2]
+#> [[0, 5], [0, 6], [1, 5], [1, 6]] 8 []
+#> [[1, 2], [1, 3], [2, 1], [2, 3], [3, 1], [3, 2]]
+#> 24 []
+#> [["a", "b"], ["a", "c"], ["a", "d"], ["b", "c"], ["b", "d"], ["c", "d"]]
+#> [[]] []
+#> [["a", "a"], ["a", "b"], ["a", "c"], ["b", "b"], ["b", "c"], ["c", "c"]]
+#> [[], [1], [2], [3], [1, 2], [1, 3], [2, 3], [1, 2, 3]]

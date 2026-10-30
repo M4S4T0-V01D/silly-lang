@@ -1,0 +1,105 @@
+# Wrapping and indenting paragraphs of text.
+#
+#     import textwrap
+#     fn main():
+#         for line in textwrap.wrap("The quick brown fox jumps over the lazy dog", 15):
+#             print(line)
+#         print(textwrap.indent("a\nb", "> "))
+#         print(textwrap.shorten("Hello  world, this is long", 15))    # Hello [...]
+
+import string
+
+# Breaks text into lines of at most `width` characters, at whitespace.
+# Words longer than the width are split.
+fn wrap(text: &str, width: int) -> list[str]:
+    var lines: list[str] = []
+    var line = ""
+    var w = 0
+    for word in string.split_whitespace(text):
+        var rest = word.clone()
+        var rw = string.width(&rest)
+        if w > 0 and w + 1 + rw <= width:
+            line += " " + rest
+            w += 1 + rw
+            continue
+        if w > 0:
+            lines.push(line)
+            line = ""
+            w = 0
+        while rw > width and width > 0:
+            let (head, tail) = _split_at(&rest, width)
+            lines.push(head)
+            rest = tail
+            rw = string.width(&rest)
+        line = rest
+        w = rw
+    if w > 0:
+        lines.push(line)
+    return lines
+
+# The first n characters and the rest.
+fn _split_at(s: &str, n: int) -> (str, str):
+    var count = 0
+    var i = 0
+    for b in s.bytes():
+        if (b & 0xC0) != 0x80:
+            if count == n:
+                return (s[0:i], s[i:])
+            count += 1
+        i += 1
+    return (s.clone(), "")
+
+# wrap() joined with newlines.
+fn fill(text: &str, width: int) -> str:
+    return "\n".join(wrap(text, width))
+
+# Removes the indentation that every non-blank line shares.
+fn dedent(text: &str) -> str:
+    let lines = text.split("\n")
+    var common = -1
+    for line in lines:
+        if line.trim() == "":
+            continue
+        var n = 0
+        for b in line.bytes():
+            if b != 32 and b != 9:
+                break
+            n += 1
+        if common < 0 or n < common:
+            common = n
+    if common <= 0:
+        return text.clone()
+    var out: list[str] = []
+    for line in lines:
+        if line.trim() == "":
+            out.push("")
+        else:
+            out.push(line[common:])
+    return "\n".join(out)
+
+# Puts `prefix` in front of every non-blank line.
+fn indent(text: &str, prefix: &str) -> str:
+    var out: list[str] = []
+    for line in text.split("\n"):
+        if line.trim() == "":
+            out.push(line)
+        else:
+            out.push(prefix + line)
+    return "\n".join(out)
+
+# Collapses whitespace and cuts at a word boundary to fit `width`, ending in " [...]".
+fn shorten(text: &str, width: int) -> str:
+    let words = string.split_whitespace(text)
+    let whole = " ".join(words)
+    if string.width(&whole) <= width:
+        return whole
+    let mark = " [...]"
+    var out = ""
+    for word in words:
+        let next = word.clone() if out == "" else out + " " + word
+        if string.width(&next) + string.width(mark) > width:
+            break
+        out = next
+    if out == "":
+        return mark.trim()
+    return out + mark

@@ -1,0 +1,5 @@
+# error: top-level variables are not allowed
+var counter = 0
+
+fn main():
+    print(counter)

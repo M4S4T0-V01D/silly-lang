@@ -1,0 +1,51 @@
+# re: compile, search, sub, split, groups, flags, errors
+
+import re
+
+fn main():
+    main2()
+    let date = re.compile("(?P<y>\\d{4})-(\\d\\d)-(\\d\\d)").unwrap()
+    match date.search("due 2026-10-30!"):
+        case Some(m): print(m.group(0), m.named("y"), m.group(2), m.span())
+        case None: print("no date")
+    print(re.sub("\\s+", " ", "a   b \t c"))
+    print(re.find_all("[a-z]+", "one 2 three"))
+    print(re.split(",\\s*", "a, b,c"))
+fn shout(m: re.Match) -> str:
+    return m.group(0).upper()
+
+fn main2():
+    let w = re.compile("\\w+").unwrap()
+    print(w.sub_fn("hi there, you", shout))
+    print(w.sub_n("a b c d", "x", 2), w.split_n("a b c d", 2))
+    let r = re.compile_flags("^(?P<k>[a-z]+)=(?P<v>.*)$", re.IGNORECASE | re.MULTILINE).unwrap()
+    for m in r.find_iter("Name=Bob\nAGE=42\n#skip"):
+        print(m.group_map(), m.expand("\\g<v> is \\g<k>"), m.groups())
+    print(r.group_count(), r.group_index("v"), r.group_index("zz"))
+    match re.search("(\\d+)", "abc 123"):
+        case Some(m): print(m.span(), m.start(1), m.end(1), m.len())
+        case None: print("none")
+    print(re.compile("x").unwrap().search_from("x..x", 1).unwrap().span())
+    for p in ["(abc", "a**", "[z-a]", "\\q", "(?<=a+)b", "(?P<x>a)(?P<x>b)", "a{3,2}"]:
+        match re.compile(p):
+            case Ok(_): print("ok?", p)
+            case Err(e): print(e)
+
+#> HI THERE, YOU
+#> x x c d ["", " ", " c d"]
+#> {"k": "Name", "v": "Bob"} Bob is Name ["Name", "Bob"]
+#> {"k": "AGE", "v": "42"} 42 is AGE ["AGE", "42"]
+#> 2 Some(2) None
+#> (4, 7) 4 7 2
+#> (3, 4)
+#> re: missing ), unterminated subpattern at position 4
+#> re: multiple repeat at position 2
+#> re: bad character range at position 4
+#> re: bad escape \q at position 1
+#> re: look-behind requires a fixed-width pattern
+#> re: redefinition of group name 'x' at position 14
+#> re: min repeat greater than max repeat at position 6
+#> 2026-10-30 2026 10 (4, 14)
+#> a b c
+#> ["one", "three"]
+#> ["a", "b", "c"]

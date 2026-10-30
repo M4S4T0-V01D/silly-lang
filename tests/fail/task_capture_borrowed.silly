@@ -1,0 +1,6 @@
+# error: only borrowed
+fn go(xs: &list[int]) -> Task[int]:
+    return spawn(fn() => xs.len())
+fn main():
+    let xs = [1]
+    print(go(&xs).join())

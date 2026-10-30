@@ -1,0 +1,4 @@
+# error: cannot be printed: it holds a Task
+fn main():
+    let t = spawn(fn() => 1)
+    print(f"{t}")

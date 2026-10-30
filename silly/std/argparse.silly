@@ -1,0 +1,411 @@
+# Command-line parsing, like Python's argparse.
+#
+#     import argparse
+#     fn main():
+#         var p = argparse.Parser.new("wc", "Count lines in files.")
+#         p.flag("verbose", "v", "say what is happening")
+#         p.int_option("width", "w", 80, "column width")
+#         p.choice("mode", "", ["lines", "words"], "lines", "what to count")
+#         p.rest("files", "files to read")
+#         let a = p.parse_args()                  # -h prints help; errors exit with 2
+#         if a.flag("verbose"):
+#             print("width", a.int("width"), "mode", a.get("mode"), a.list("files"))
+#
+# Long options are --name, --name=value or any unique prefix of the name; short
+# ones are -n, -nVALUE, -n VALUE, and short flags combine (-vq). "--" ends the
+# options. Values are looked up by the long name (positionals by their name).
+
+import string
+import sys
+
+const _FLAG: int = 0
+const _COUNT: int = 1
+const _STR: int = 2
+const _INT: int = 3
+const _FLOAT: int = 4
+
+struct _Opt:
+    name: str
+    short: str
+    kind: int
+    default: str                    # "" for none
+    help: str
+    required: bool
+    many: bool                      # every use adds a value
+    choices: list[str]
+
+struct _Pos:
+    name: str
+    help: str
+    need: bool
+    rest: bool
+    default: str
+
+# The parsed command line: look options and positionals up by name.
+struct Args:
+    values: map[str, list[str]]
+    given: map[str, bool]
+    help_wanted: bool
+
+    fn _vals(self, name: str) -> list[str]:
+        if not self.values.contains(name):
+            panic("argparse: no argument named '" + name + "'")
+        return self.values[name].clone()
+
+    # Whether a flag was given (at least once).
+    fn flag(self, name: str) -> bool:
+        return len(self._vals(name)) > 0
+
+    # How many times a flag or counted option was given.
+    fn count(self, name: str) -> int:
+        return len(self._vals(name))
+
+    # The value of an option or positional; "" when it has none.
+    fn get(self, name: str) -> str:
+        let v = self._vals(name)
+        if len(v) == 0:
+            return ""
+        return v[len(v) - 1].clone()
+
+    fn int(self, name: str) -> int:
+        return self.get(name).parse_int().unwrap_or(0)
+
+    fn float(self, name: str) -> f64:
+        return self.get(name).parse_float().unwrap_or(0.0)
+
+    # Every value: of a rest positional, or of an append option in order given.
+    fn list(self, name: str) -> list[str]:
+        return self._vals(name)
+
+    # Whether the argument was on the command line (not just defaulted).
+    fn has(self, name: str) -> bool:
+        return self.given.contains(name)
+
+# Describes the options and positionals a program takes (start with Parser.new).
+struct Parser:
+    prog: str
+    about: str
+    opts: list[_Opt]
+    pos: list[_Pos]
+
+    fn new(prog: str, about: str) -> Parser:
+        return Parser(prog, about, [], [])
+
+    fn _add(mut self, name: str, short: str, kind: int, default: str, help: str, required: bool, many: bool, choices: list[str]):
+        if len(short) > 1:
+            panic("argparse: short name '" + short + "' must be one character")
+        for o in self.opts:
+            if o.name == name or (short != "" and o.short == short):
+                panic("argparse: option '" + name + "' defined twice")
+        self.opts.push(_Opt(name, short, kind, default, help, required, many, choices))
+
+    # A switch: --name or -s.
+    fn flag(mut self, name: str, short: str, help: str):
+        self._add(name, short, _FLAG, "", help, false, true, [])
+
+    # A switch that may repeat, like -vvv; read it with count().
+    fn count(mut self, name: str, short: str, help: str):
+        self._add(name, short, _COUNT, "", help, false, true, [])
+
+    # An option taking a string. An empty default means none.
+    fn option(mut self, name: str, short: str, default: str, help: str):
+        self._add(name, short, _STR, default, help, false, false, [])
+
+    fn int_option(mut self, name: str, short: str, default: int, help: str):
+        self._add(name, short, _INT, str(default), help, false, false, [])
+
+    fn float_option(mut self, name: str, short: str, default: f64, help: str):
+        self._add(name, short, _FLOAT, str(default), help, false, false, [])
+
+    # A string option that must be given.
+    fn required(mut self, name: str, short: str, help: str):
+        self._add(name, short, _STR, "", help, true, false, [])
+
+    # An option that may repeat, collecting every value; read it with list().
+    fn append(mut self, name: str, short: str, help: str):
+        self._add(name, short, _STR, "", help, false, true, [])
+
+    # An option whose value must be one of choices.
+    fn choice(mut self, name: str, short: str, choices: list[str], default: str, help: str):
+        self._add(name, short, _STR, default, help, false, false, choices)
+
+    fn _add_pos(mut self, p: _Pos):
+        if len(self.pos) > 0 and self.pos[len(self.pos) - 1].rest:
+            panic("argparse: no positional can follow rest '" + self.pos[len(self.pos) - 1].name + "'")
+        self.pos.push(p)
+
+    # A positional argument that must be given.
+    fn positional(mut self, name: str, help: str):
+        self._add_pos(_Pos(name, help, true, false, ""))
+
+    # A positional that may be left out.
+    fn optional(mut self, name: str, default: str, help: str):
+        self._add_pos(_Pos(name, help, false, false, default))
+
+    # Every remaining positional (zero or more); it must come last.
+    fn rest(mut self, name: str, help: str):
+        self._add_pos(_Pos(name, help, false, true, ""))
+
+    # ---- help ----
+
+    fn _metavar(self, o: &_Opt) -> str:
+        if len(o.choices) > 0:
+            return "{" + ",".join(o.choices.clone()) + "}"
+        return o.name.upper().replace("-", "_")
+
+    fn _invocation(self, o: &_Opt) -> str:
+        var s = ""
+        if o.short != "":
+            s = "-" + o.short + ", "
+        s += "--" + o.name
+        if o.kind >= _STR:
+            s += " " + self._metavar(o)
+        return s
+
+    fn usage(self) -> str:
+        var s = "usage: " + self.prog + " [-h]"
+        for o in self.opts:
+            var part = ("-" + o.short) if o.short != "" else ("--" + o.name)
+            if o.kind >= _STR:
+                part += " " + self._metavar(&o)
+            s += " " + (part if o.required else "[" + part + "]")
+        for p in self.pos:
+            if p.rest:
+                s += " [" + p.name + " ...]"
+            elif p.need:
+                s += " " + p.name
+            else:
+                s += " [" + p.name + "]"
+        return s
+
+    fn help(self) -> str:
+        var rows: list[(str, str)] = []
+        var out = self.usage() + "\n"
+        if self.about != "":
+            out += "\n" + self.about + "\n"
+        var width = 0
+        for p in self.pos:
+            width = max(width, len(p.name))
+        width = max(width, len("-h, --help"))
+        for o in self.opts:
+            width = max(width, len(self._invocation(&o)))
+        let col = min(width, 24) + 4
+        if len(self.pos) > 0:
+            out += "\npositional arguments:\n"
+            for p in self.pos:
+                var h = p.help
+                if p.default != "":
+                    h += " (default: " + p.default + ")"
+                out += _row(&p.name, &h, col)
+        out += "\noptions:\n"
+        out += _row(&"-h, --help", &"show this help message and exit", col)
+        for o in self.opts:
+            var h = o.help
+            if o.default != "" and o.kind >= _STR:
+                h += " (default: " + o.default + ")"
+            elif o.required:
+                h += " (required)"
+            out += _row(&self._invocation(&o), &h, col)
+        return out
+
+    # ---- parsing ----
+
+    fn _long(self, name: &str) -> Result[int, str]:
+        var hits: list[int] = []
+        for i in 0..len(self.opts):
+            if self.opts[i].name == name:
+                return Ok(i)
+            if self.opts[i].name.starts_with(name):
+                hits.push(i)
+        if "help".starts_with(name) and name != "":
+            hits.push(-1)
+        if len(hits) == 1:
+            return Ok(hits[0])
+        if len(hits) > 1:
+            var names: list[str] = []
+            for h in hits:
+                names.push("--" + (self.opts[h].name if h >= 0 else "help"))
+            return Err("ambiguous option: --" + name + " could match " + ", ".join(names))
+        return Err("unrecognized arguments: --" + name)
+
+    fn _short(self, c: &str) -> Result[int, str]:
+        if c == "h":
+            return Ok(-1)
+        for i in 0..len(self.opts):
+            if self.opts[i].short == c:
+                return Ok(i)
+        return Err("unrecognized arguments: -" + c)
+
+    fn _label(self, o: &_Opt) -> str:
+        if o.short != "":
+            return "-" + o.short + "/--" + o.name
+        return "--" + o.name
+
+    # Checks a value against the option's type and choices.
+    fn _check(self, o: &_Opt, v: &str) -> Result[bool, str]:
+        if o.kind == _INT and v.parse_int().is_none():
+            return Err("argument " + self._label(o) + ": invalid int value: '" + v + "'")
+        if o.kind == _FLOAT and v.parse_float().is_none():
+            return Err("argument " + self._label(o) + ": invalid float value: '" + v + "'")
+        if len(o.choices) > 0 and not o.choices.contains(v.clone()):
+            var cs: list[str] = []
+            for c in o.choices:
+                cs.push("'" + c + "'")
+            return Err("argument " + self._label(o) + ": invalid choice: '" + v + "' (choose from " + ", ".join(cs) + ")")
+        return Ok(true)
+
+    # Parses arguments (without the program name). Asking for help (-h, --help)
+    # gives Ok with help_wanted set and nothing else checked.
+    fn parse(self, argv: &list[str]) -> Result[Args, str]:
+        var values: map[str, list[str]] = {}
+        var given: map[str, bool] = {}
+        for o in self.opts:
+            values[o.name.clone()] = []
+        var positionals: list[str] = []
+        var i = 0
+        var only_pos = false
+        while i < len(argv):
+            let a = argv[i].clone()
+            i += 1
+            if only_pos or a == "-" or not a.starts_with("-") or _is_number(&a):
+                positionals.push(a)
+                continue
+            if a == "--":
+                only_pos = true
+                continue
+            if a.starts_with("--"):
+                var name = a[2:]
+                var inline: Option[str] = None
+                match name.find("="):
+                    case Some(eq):
+                        inline = Some(name[eq + 1:])
+                        name = name[:eq]
+                    case None: pass
+                var k = 0
+                match self._long(&name):
+                    case Ok(x): k = x
+                    case Err(e): return Err(e)
+                if k < 0:
+                    return Ok(Args({}, {}, true))
+                let o = self.opts[k].clone()
+                if o.kind < _STR:
+                    if inline.is_some():
+                        return Err("argument " + self._label(&o) + ": ignored explicit argument '" + inline.unwrap() + "'")
+                    values[o.name].push("1")
+                else:
+                    var v = ""
+                    match inline:
+                        case Some(x): v = x
+                        case None:
+                            if i >= len(argv) or (argv[i].starts_with("-") and argv[i] != "-" and not _is_number(&argv[i])):
+                                return Err("argument " + self._label(&o) + ": expected one argument")
+                            v = argv[i].clone()
+                            i += 1
+                    match self._check(&o, &v):
+                        case Err(e): return Err(e)
+                        case Ok(_): pass
+                    if not o.many:
+                        values[o.name].clear()
+                    values[o.name].push(v)
+                given[o.name.clone()] = true
+                continue
+            # A cluster of short options: -vq, -ofile, -o file.
+            let cs = a[1:].chars()
+            var j = 0
+            while j < len(cs):
+                let c = str(cs[j])
+                j += 1
+                var k = 0
+                match self._short(&c):
+                    case Ok(x): k = x
+                    case Err(e): return Err(e)
+                if k < 0:
+                    return Ok(Args({}, {}, true))
+                let o = self.opts[k].clone()
+                given[o.name.clone()] = true
+                if o.kind < _STR:
+                    values[o.name].push("1")
+                    continue
+                var v = ""
+                if j < len(cs):
+                    for x in cs[j:]:
+                        v += str(x)
+                    j = len(cs)
+                else:
+                    if i >= len(argv) or (argv[i].starts_with("-") and argv[i] != "-" and not _is_number(&argv[i])):
+                        return Err("argument " + self._label(&o) + ": expected one argument")
+                    v = argv[i].clone()
+                    i += 1
+                match self._check(&o, &v):
+                    case Err(e): return Err(e)
+                    case Ok(_): pass
+                if not o.many:
+                    values[o.name].clear()
+                values[o.name].push(v)
+        # Required options, then defaults.
+        var missing: list[str] = []
+        for o in self.opts:
+            if o.required and not given.contains(o.name):
+                missing.push(self._label(&o))
+            if not given.contains(o.name) and o.default != "":
+                values[o.name] = [o.default.clone()]
+        # Positionals: the required ones first claim their values, then the
+        # optional ones in order, then rest takes what is left.
+        var need = 0
+        for p in self.pos:
+            if p.need:
+                need += 1
+        var spare = len(positionals) - need
+        var at = 0
+        for p in self.pos:
+            if p.rest:
+                var r: list[str] = []
+                while at < len(positionals):
+                    r.push(positionals[at].clone())
+                    at += 1
+                if len(r) > 0:
+                    given[p.name.clone()] = true
+                values[p.name.clone()] = r
+            elif p.need or spare > 0:
+                if not p.need:
+                    spare -= 1
+                if at < len(positionals):
+                    values[p.name.clone()] = [positionals[at].clone()]
+                    given[p.name.clone()] = true
+                    at += 1
+                else:
+                    values[p.name.clone()] = []
+                    missing.push(p.name.clone())
+            else:
+                values[p.name.clone()] = [p.default.clone()] if p.default != "" else []
+        if len(missing) > 0:
+            return Err("the following arguments are required: " + ", ".join(missing))
+        if at < len(positionals):
+            return Err("unrecognized arguments: " + " ".join(positionals[at:]))
+        return Ok(Args(values, given, false))
+
+    # Parses the program's own arguments. Prints help and exits with 0 on -h;
+    # prints usage and the error to stderr and exits with 2 on a bad command line.
+    fn parse_args(self) -> Args:
+        let argv = sys.argv()
+        match self.parse(&argv[1:]):
+            case Ok(a):
+                if a.help_wanted:
+                    sys.stdout(self.help())
+                    sys.exit(0)
+                return a
+            case Err(e):
+                sys.stderr(self.usage() + "\n" + self.prog + ": error: " + e + "\n")
+                sys.exit(2)
+        return Args({}, {}, false)
+
+fn _row(left: &str, help: &str, col: int) -> str:
+    var s = "  " + left
+    if help == "":
+        return s + "\n"
+    if len(s) + 2 > col:
+        return s + "\n" + string.pad_right(&"", col, ' ') + help + "\n"
+    return string.pad_right(&s, col, ' ') + help + "\n"
+
+fn _is_number(s: &str) -> bool:
+    return s.starts_with("-") and (s.parse_int().is_some() or s.parse_float().is_some())

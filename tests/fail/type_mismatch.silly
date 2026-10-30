@@ -1,0 +1,4 @@
+# error: expected i64, found str
+fn main():
+    var x = 1
+    x = "one"

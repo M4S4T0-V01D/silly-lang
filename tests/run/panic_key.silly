@@ -1,0 +1,7 @@
+#! exit 101
+#! stderr key not found in map
+fn main():
+    let m = {"a": 1}
+    print(m["a"])
+    print(m["b"])
+#> 1

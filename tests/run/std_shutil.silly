@@ -1,0 +1,52 @@
+# shutil: copytree, copy, move, rmtree, which, tree_size
+
+import os
+import shutil
+import glob
+
+fn show(base: &str):
+    for f in os.walk(base.clone()).unwrap():
+        print(f[len(base) + 1:])
+
+fn main():
+    let t = os.mkdtemp("shx").unwrap()
+    os.chdir(t.clone()).unwrap()
+    os.makedirs("src/sub").unwrap()
+    os.write("src/a.txt", "hello").unwrap()
+    os.write("src/sub/b.sh", "#!/bin/sh\necho hi\n").unwrap()
+    os.chmod("src/sub/b.sh", 0o755).unwrap()
+    os.symlink("a.txt", "src/link").unwrap()
+    print(shutil.copytree("src", "dst").unwrap())
+    show(&"dst")
+    print(os.is_link("dst/link"), os.readlink("dst/link").unwrap())
+    print(os.mode("dst/sub/b.sh").unwrap() & 0o777 == 0o755)
+    print(shutil.copytree("src", "dst").is_err())
+    print(shutil.copyfile("src/a.txt", "dst/sub").unwrap())
+    print(shutil.copy("src/sub/b.sh", "c.sh").unwrap(), os.mode("c.sh").unwrap() & 0o777 == 0o755)
+    os.mkdir("box").unwrap()
+    print(shutil.move("dst", "box/").unwrap())
+    print(shutil.move("c.sh", "box/d.sh").unwrap(), os.exists("c.sh"))
+    print(shutil.move("src", "box").is_ok(), glob.glob(&"box/*"))
+    print(shutil.tree_size("box/src").unwrap())
+    print(shutil.which("sh").is_some(), shutil.which("no-such-prog-xyz").is_none())
+    print(shutil.which("./box/d.sh").unwrap())
+    print(shutil.rmtree("box").unwrap(), os.exists("box"), shutil.rmtree("box").is_err())
+    os.chdir("/").unwrap()
+    os.remove_all(t).unwrap()
+
+#> true
+#> a.txt
+#> link
+#> sub/b.sh
+#> true a.txt
+#> true
+#> true
+#> dst/sub/a.txt
+#> c.sh true
+#> box/dst
+#> box/d.sh false
+#> true ["box/d.sh", "box/dst", "box/src"]
+#> 23
+#> true true
+#> ./box/d.sh
+#> true false true

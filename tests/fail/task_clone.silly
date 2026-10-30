@@ -1,0 +1,4 @@
+# error: cannot be cloned: it holds a Task
+fn main():
+    let ts = [spawn(fn() => 1)]
+    let us = ts.clone()

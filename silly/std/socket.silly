@@ -1,0 +1,164 @@
+# TCP and UDP sockets over IPv4 and IPv6, like Python's socket.
+#
+#     import socket
+#     fn main():
+#         let server = socket.listen(&"127.0.0.1", 0, 16).unwrap()
+#         let port = server.local_port()
+#         let t = spawn(fn() => socket.connect(&"127.0.0.1", port).unwrap().send(&"hi"))
+#         let c = server.accept().unwrap()
+#         print(c.recv(100).unwrap())               # hi
+#         t.join()
+#
+# Every call that can fail returns a Result whose error says what went wrong
+# ("connect: Connection refused"). recv returns "" once the other side has
+# closed the connection.
+
+extern "socket.c"
+
+extern fn sk_error() -> str
+extern fn sk_failed() -> bool
+extern fn sk_connect(host: str, port: int, timeout: f64) -> int
+extern fn sk_bind(host: str, port: int, tcp: bool, backlog: int) -> int
+extern fn sk_accept(fd: int) -> int
+extern fn sk_peer(fd: int) -> bool
+extern fn sk_local(fd: int) -> bool
+extern fn sk_addr() -> str
+extern fn sk_port() -> int
+extern fn sk_send(fd: int, data: str) -> int
+extern fn sk_recv(fd: int, max: int) -> str
+extern fn sk_sendto(fd: int, data: str, host: str, port: int) -> int
+extern fn sk_recvfrom(fd: int, max: int) -> str
+extern fn sk_udp(host: str) -> int
+extern fn sk_timeout(fd: int, secs: f64) -> bool
+extern fn sk_ready(fd: int, secs: f64) -> int
+extern fn sk_shutdown(fd: int) -> bool
+extern fn sk_close(fd: int)
+extern fn sk_lookup(host: str) -> str
+
+# An open socket: a TCP connection, a listening TCP socket or a UDP socket.
+struct Socket:
+    fd: int
+
+    # Sends all of data; the number of bytes sent.
+    fn send(self, data: &str) -> Result[int, str]:
+        let n = sk_send(self.fd, data.clone())
+        if n < 0:
+            return Err(sk_error())
+        return Ok(n)
+
+    # Up to max bytes as they arrive; "" when the other side has closed.
+    fn recv(self, max: int) -> Result[str, str]:
+        let s = sk_recv(self.fd, max)
+        if sk_failed():
+            return Err(sk_error())
+        return Ok(s)
+
+    # Everything until the other side closes.
+    fn recv_all(self) -> Result[str, str]:
+        var out = ""
+        while true:
+            let s = self.recv(65536)?
+            if s == "":
+                break
+            out += s
+        return Ok(out)
+
+    # A connection from the queue of a listening socket (waits for one).
+    fn accept(self) -> Result[Socket, str]:
+        let fd = sk_accept(self.fd)
+        if fd < 0:
+            return Err(sk_error())
+        return Ok(Socket(fd))
+
+    # A datagram and the address and port it came from (UDP).
+    fn recvfrom(self, max: int) -> Result[(str, str, int), str]:
+        let s = sk_recvfrom(self.fd, max)
+        if sk_failed():
+            return Err(sk_error())
+        return Ok((s, sk_addr(), sk_port()))
+
+    # Sends one datagram to host:port (UDP).
+    fn sendto(self, data: &str, host: &str, port: int) -> Result[int, str]:
+        let n = sk_sendto(self.fd, data.clone(), host.clone(), port)
+        if n < 0:
+            return Err(sk_error())
+        return Ok(n)
+
+    # Makes recv, accept and send give up with an error after secs (0: wait forever).
+    fn set_timeout(self, secs: f64) -> Result[bool, str]:
+        if not sk_timeout(self.fd, secs):
+            return Err(sk_error())
+        return Ok(true)
+
+    # Whether there is something to recv (or accept) within secs; -1.0 waits forever.
+    fn ready(self, secs: f64) -> Result[bool, str]:
+        let r = sk_ready(self.fd, secs)
+        if r < 0:
+            return Err(sk_error())
+        return Ok(r == 1)
+
+    # Says this side is done sending; the other side's recv then returns "".
+    fn shutdown(self) -> Result[bool, str]:
+        if not sk_shutdown(self.fd):
+            return Err(sk_error())
+        return Ok(true)
+
+    fn close(self):
+        sk_close(self.fd)
+
+    # The address and port of the other side.
+    fn peer(self) -> (str, int):
+        if not sk_peer(self.fd):
+            return ("", 0)
+        return (sk_addr(), sk_port())
+
+    # The address and port this socket is bound to.
+    fn local(self) -> (str, int):
+        if not sk_local(self.fd):
+            return ("", 0)
+        return (sk_addr(), sk_port())
+
+    # The local port (useful after listening on port 0, which picks a free one).
+    fn local_port(self) -> int:
+        let (_, p) = self.local()
+        return p
+
+# A TCP connection to host:port.
+fn connect(host: &str, port: int) -> Result[Socket, str]:
+    return connect_timeout(host, port, 0.0)
+
+# Like connect, giving up after secs.
+fn connect_timeout(host: &str, port: int, secs: f64) -> Result[Socket, str]:
+    let fd = sk_connect(host.clone(), port, secs)
+    if fd < 0:
+        return Err(sk_error())
+    return Ok(Socket(fd))
+
+# A TCP socket listening on host:port ("" for every address, port 0 for any
+# free port), queueing up to backlog connections.
+fn listen(host: &str, port: int, backlog: int) -> Result[Socket, str]:
+    let fd = sk_bind(host.clone(), port, true, backlog)
+    if fd < 0:
+        return Err(sk_error())
+    return Ok(Socket(fd))
+
+# A UDP socket bound to host:port, to receive datagrams on.
+fn udp_bind(host: &str, port: int) -> Result[Socket, str]:
+    let fd = sk_bind(host.clone(), port, false, 0)
+    if fd < 0:
+        return Err(sk_error())
+    return Ok(Socket(fd))
+
+# An unbound UDP socket for sending to host's address family.
+fn udp(host: &str) -> Result[Socket, str]:
+    let fd = sk_udp(host.clone())
+    if fd < 0:
+        return Err(sk_error())
+    return Ok(Socket(fd))
+
+# The first address host resolves to ("localhost" -> "127.0.0.1").
+fn gethostbyname(host: &str) -> Result[str, str]:
+    let a = sk_lookup(host.clone())
+    if sk_failed():
+        return Err(sk_error())
+    return Ok(a)

@@ -1,0 +1,61 @@
+# Math functions backed by the C math library.
+
+const PI: f64 = 3.141592653589793
+const TAU: f64 = 6.283185307179586
+const E: f64 = 2.718281828459045
+
+# The square root of x.
+extern fn sqrt(x: f64) -> f64
+# The cube root of x.
+extern fn cbrt(x: f64) -> f64
+# Sine of x radians.
+extern fn sin(x: f64) -> f64
+# Cosine of x radians.
+extern fn cos(x: f64) -> f64
+# Tangent of x radians.
+extern fn tan(x: f64) -> f64
+# Arc sine, in radians.
+extern fn asin(x: f64) -> f64
+# Arc cosine, in radians.
+extern fn acos(x: f64) -> f64
+# Arc tangent, in radians.
+extern fn atan(x: f64) -> f64
+# The angle of the point (x, y), from -PI to PI.
+extern fn atan2(y: f64, x: f64) -> f64
+# e to the power x.
+extern fn exp(x: f64) -> f64
+# The natural logarithm of x.
+extern fn log(x: f64) -> f64
+# The base-2 logarithm of x.
+extern fn log2(x: f64) -> f64
+# The base-10 logarithm of x.
+extern fn log10(x: f64) -> f64
+# x to the power y.
+extern fn pow(x: f64, y: f64) -> f64
+# sqrt(x*x + y*y), without overflow.
+extern fn hypot(x: f64, y: f64) -> f64
+# The largest whole number <= x.
+extern fn floor(x: f64) -> f64
+# The smallest whole number >= x.
+extern fn ceil(x: f64) -> f64
+# The absolute value of x.
+extern fn fabs(x: f64) -> f64
+
+
+# Positive infinity.
+fn inf() -> f64:
+    return 1.0 / 0.0
+
+
+# The greatest common divisor of a and b (never negative).
+fn gcd(a: int, b: int) -> int:
+    var x = abs(a)
+    var y = abs(b)
+    while y != 0:
+        (x, y) = (y, x % y)
+    return x
+
+
+# x, limited to lo..hi.
+fn clamp(x: f64, lo: f64, hi: f64) -> f64:
+    return lo if x < lo else (hi if x > hi else x)

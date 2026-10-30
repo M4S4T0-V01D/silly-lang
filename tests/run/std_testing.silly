@@ -1,0 +1,78 @@
+# testing: assertions, suites, reports
+
+import testing
+
+fn t_pass() -> Result[bool, str]:
+    testing.eq(1 + 1, 2)?
+    testing.eq("ab", "ab")?
+    testing.ne(1, 2)?
+    testing.lt(1, 2)?
+    testing.ge(2.5, 2.5)?
+    testing.near(0.1 + 0.2, 0.3, 0.000001)?
+    testing.contains(&[1, 2, 3], 2)?
+    testing.str_contains(&"hello", &"ell")?
+    let r: Result[int, str] = Ok(3)
+    testing.is_ok(&r)?
+    testing.is_some(&Some(1))?
+    return testing.ok()
+
+fn t_fail_str() -> Result[bool, str]:
+    testing.eq("1", "2")?
+    return testing.fail("not reached")
+
+fn t_fail_list() -> Result[bool, str]:
+    testing.eq_msg([1, 2], [1, 3], "lists")?
+    return testing.ok()
+
+fn main():
+    print(testing.eq(1, 2).unwrap_err())
+    print(testing.eq("a", "b").unwrap_err())
+    print(testing.gt(1, 2).unwrap_err())
+    print(testing.near(1.0, 1.5, 0.1).unwrap_err())
+    print(testing.contains(&["x"], "y").unwrap_err())
+    let r: Result[int, str] = Err("boom")
+    print(testing.is_ok(&r).unwrap_err())
+    let r7: Result[int, str] = Ok(7)
+    print(testing.is_err(&r7).unwrap_err())
+    print(testing.is_none(&Some("s")).unwrap_err())
+    print(testing.repr(&"q"), testing.repr(&5), testing.repr(&'c'))
+    var s = testing.suite_with("demo", &["-q"])
+    s.run("t_pass", t_pass)
+    s.run("t_fail_str", t_fail_str)
+    s.run("t_fail_list", t_fail_list)
+    s.skip("t_skip", "later")
+    print(s.report(false))
+    var k = testing.suite_with("demo", &["-q", "pass"])
+    k.run("t_pass", t_pass)
+    k.run("t_fail_str", t_fail_str)
+    print(k.selected(&"t_pass"), k.selected(&"other"), k.report(false))
+
+#> 1 != 2
+#> "a" != "b"
+#> 1 not greater than 2
+#> 1.0 != 1.5 within 0.1 delta (0.5 difference)
+#> "y" not found in ["x"]
+#> expected Ok, got Err("boom")
+#> expected Err, got Ok(7)
+#> expected None, got Some("s")
+#> "q" 5 'c'
+#> ======================================================================
+#> FAIL: t_fail_str (demo)
+#> ----------------------------------------------------------------------
+#> "1" != "2"
+#>
+#> ======================================================================
+#> FAIL: t_fail_list (demo)
+#> ----------------------------------------------------------------------
+#> [1, 2] != [1, 3] : lists
+#>
+#> ----------------------------------------------------------------------
+#> Ran 4 tests
+#>
+#> FAILED (failures=2, skipped=1)
+#>
+#> true false ----------------------------------------------------------------------
+#> Ran 1 test
+#>
+#> OK
+#>

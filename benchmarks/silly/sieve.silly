@@ -1,0 +1,19 @@
+# Sieve of Eratosthenes over one large flat buffer.
+
+fn main():
+    let a = args()
+    let n = a[1].parse_int().unwrap() if len(a) > 1 else 1000000
+    var composite: list[bool] = []
+    for _ in 0..n + 1:
+        composite.push(false)
+    var count = 0
+    var last = 0
+    for i in 2..n + 1:
+        if not composite[i]:
+            count += 1
+            last = i
+            var j = i * i
+            while j <= n:
+                composite[j] = true
+                j += i
+    print(count, last)

@@ -1,0 +1,98 @@
+# Message digests and checksums, like Python's hashlib, hmac and zlib.crc32.
+#
+#     import hashlib
+#     fn main():
+#         print(hashlib.sha256("abc"))         # ba7816bf8f01cfea...
+#         print(hashlib.md5(""))               # d41d8cd98f00b204e9800998ecf8427e
+#         print(hashlib.hmac_sha256("key", "message"))
+#         print(hashlib.crc32("hello"))        # 907060870
+#
+# md5, sha1, sha256 and sha512 return lowercase hex; the *_bytes versions return
+# the raw digest as a str of bytes (use .bytes() to get at them). MD5 and SHA-1
+# are broken for security: use them only for checksums and old formats.
+
+extern "hashlib.c"
+
+extern fn hl_md5(s: str) -> str
+extern fn hl_sha1(s: str) -> str
+extern fn hl_sha256(s: str) -> str
+extern fn hl_sha512(s: str) -> str
+extern fn hl_hmac(kind: int, key: str, msg: str) -> str
+extern fn hl_crc32(s: str) -> int
+extern fn hl_from_bytes(b: &list[u8]) -> str
+
+const _HEX: str = "0123456789abcdef"
+
+# Each byte as two lowercase hex digits.
+fn hex(s: &str) -> str:
+    var out = ""
+    for b in s.bytes():
+        out += _HEX[(b >> 4) as int:(b >> 4) as int + 1] + _HEX[(b & 15) as int:(b & 15) as int + 1]
+    return out
+
+# A str holding exactly these bytes.
+fn from_bytes(b: &list[u8]) -> str:
+    return hl_from_bytes(b)
+
+# The raw 16-byte MD5 digest of s.
+fn md5_bytes(s: &str) -> str:
+    return hl_md5(s.clone())
+
+# The raw 20-byte SHA-1 digest of s.
+fn sha1_bytes(s: &str) -> str:
+    return hl_sha1(s.clone())
+
+# The raw 32-byte SHA-256 digest of s.
+fn sha256_bytes(s: &str) -> str:
+    return hl_sha256(s.clone())
+
+# The raw 64-byte SHA-512 digest of s.
+fn sha512_bytes(s: &str) -> str:
+    return hl_sha512(s.clone())
+
+# The MD5 digest of s in hex.
+fn md5(s: &str) -> str:
+    return hex(&hl_md5(s.clone()))
+
+# The SHA-1 digest of s in hex.
+fn sha1(s: &str) -> str:
+    return hex(&hl_sha1(s.clone()))
+
+# The SHA-256 digest of s in hex.
+fn sha256(s: &str) -> str:
+    return hex(&hl_sha256(s.clone()))
+
+# The SHA-512 digest of s in hex.
+fn sha512(s: &str) -> str:
+    return hex(&hl_sha512(s.clone()))
+
+# HMAC-MD5 of msg under key, in hex.
+fn hmac_md5(key: &str, msg: &str) -> str:
+    return hex(&hl_hmac(0, key.clone(), msg.clone()))
+
+# HMAC-SHA1 of msg under key, in hex.
+fn hmac_sha1(key: &str, msg: &str) -> str:
+    return hex(&hl_hmac(1, key.clone(), msg.clone()))
+
+# HMAC-SHA256 of msg under key, in hex.
+fn hmac_sha256(key: &str, msg: &str) -> str:
+    return hex(&hl_hmac(2, key.clone(), msg.clone()))
+
+# HMAC-SHA512 of msg under key, in hex.
+fn hmac_sha512(key: &str, msg: &str) -> str:
+    return hex(&hl_hmac(3, key.clone(), msg.clone()))
+
+# The CRC-32 used by zip, gzip and PNG, as a non-negative int.
+fn crc32(s: &str) -> int:
+    return hl_crc32(s.clone())
+
+# Compares two digests in time that doesn't depend on where they differ.
+fn equal(a: &str, b: &str) -> bool:
+    if len(a) != len(b):
+        return false
+    let x = a.bytes()
+    let y = b.bytes()
+    var diff: u8 = 0
+    for i in 0..len(x):
+        diff = diff | (x[i] ^ y[i])
+    return diff == 0

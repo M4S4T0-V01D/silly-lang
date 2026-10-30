@@ -1,0 +1,164 @@
+# Traits: impls, defaults, supertraits, bounds, Self, impls for primitives and generic types.
+#> (1, 2) (1, 2)!
+#> (1, 2), (3, 4)
+#> #1, #2, #3
+#> #5 #7
+#> <(0, 0), (9, 9)>
+#> <#1, #2>!
+#> 12.0
+#> circle r=1.0 3.0
+#> 9 z
+#> 6 [0, 1, 2, 3]
+#> ["num 3", "word hi"]
+#> num 3+yes
+#> 18.0 1.0
+#> 4
+
+trait Show:
+    fn show(self) -> str
+    fn shout(self) -> str:
+        return self.show().upper() + "!"
+
+trait Shape(Show):
+    fn area(self) -> f64
+    fn new_unit() -> Self
+
+struct Point:
+    x: int
+    y: int
+
+struct Circle:
+    r: f64
+
+struct Pair[T]:
+    a: T
+    b: T
+
+impl Show for Point:
+    fn show(self) -> str:
+        return f"({self.x}, {self.y})"
+
+impl Show for Circle:
+    fn show(self) -> str:
+        return f"circle r={self.r}"
+
+impl Shape for Circle:
+    fn area(self) -> f64:
+        return 3.0 * self.r * self.r
+    fn new_unit() -> Self:
+        return Circle(1.0)
+
+impl Show for int:
+    fn show(self) -> str:
+        return f"#{self}"
+
+impl Show for Pair:
+    fn show(self) -> str:
+        return f"<{self.a.show()}, {self.b.show()}>"
+
+fn show_all[T: Show](xs: &list[T]) -> str:
+    var out: list[str] = []
+    for x in xs:
+        out.push(x.show())
+    return ", ".join(out)
+
+fn biggest[T: Shape](xs: &list[T]) -> f64:
+    var best = 0.0
+    for x in xs:
+        if x.area() > best:
+            best = x.area()
+    return best
+
+fn unit_area[T: Shape]() -> f64:
+    return T.new_unit().area()
+
+fn max_of[T: Ord + Copy](xs: &list[T]) -> T:
+    var m = xs[0]
+    for x in xs:
+        if x > m:
+            m = x
+    return m
+
+fn part1():
+    let p = Point(1, 2)
+    print(p.show(), p.shout())
+    print(show_all(&[Point(1, 2), Point(3, 4)]))
+    print(show_all(&[1, 2, 3]))
+    print(5.show(), Show.show(7))
+    print(Pair(Point(0, 0), Point(9, 9)).show())
+    print(Pair(1, 2).shout())
+    print(biggest(&[Circle(1.0), Circle(2.0)]))
+    print(Circle.new_unit().show(), unit_area[Circle]())
+    print(max_of(&[3, 9, 2]), max_of(&["b", "z", "a"]))
+
+
+trait Area:
+    fn area(self) -> f64
+    fn twice(self) -> f64:
+        return 2.0 * self.area()
+
+struct Sq:
+    side: f64
+
+trait Counter:
+    fn bump(mut self, by: int)
+    fn get(self) -> int
+
+struct C:
+    n: int
+    log: list[int]
+
+impl Counter for C:
+    fn bump(mut self, by: int):
+        self.n += by
+        self.log.push(by)
+    fn get(self) -> int:
+        return self.n
+
+enum Tok:
+    Num(int)
+    Word(str)
+
+trait Describe:
+    fn describe(self) -> str
+    fn tagged[U: Describe](self, other: U) -> str:
+        return self.describe() + "+" + other.describe()
+
+impl Describe for Tok:
+    fn describe(self) -> str:
+        match self:
+            case Num(n): return f"num {n}"
+            case Word(w): return f"word {w}"
+
+impl Describe for bool:
+    fn describe(self) -> str:
+        return "yes" if self else "no"
+
+impl Area for Sq:
+    fn area(self) -> f64:
+        return self.side * self.side
+
+fn run[T: Counter](c: &mut T, times: int):
+    for i in 0..times:
+        c.bump(i)
+
+struct Wrap:
+    v: int
+
+    fn make(v: int) -> Self:
+        return Self(v)
+
+fn part2():
+    var c = C(0, [])
+    run(&mut c, 4)
+    print(c.get(), c.log)
+    let toks = [Tok.Num(3), Tok.Word("hi")]
+    print(toks.map(fn(t) => t.describe()))
+    print(toks[0].tagged(true))
+    print(Sq(3.0).twice(), Sq(1.0).area())
+    print(Wrap.make(4).v)
+
+
+fn main():
+    part1()
+    part2()

@@ -1,0 +1,56 @@
+enum Expr:
+    Num(int)
+    Add(l: int, r: int)
+    Neg(int)
+    Nothing
+
+fn eval(e: Expr) -> int:
+    match e:
+        case Num(n): return n
+        case Add(l, r): return l + r
+        case Neg(n): return -n
+        case Nothing: return 0
+
+fn describe(n: int) -> str:
+    match n:
+        case 0: return "zero"
+        case 1 | 2 | 3: return "small"
+        case x if x < 0: return "negative"
+        case _: return "big"
+
+fn parse(s: str) -> Result[int, str]:
+    match s.parse_int():
+        case Some(v): return Ok(v)
+        case None: return Err(f"bad number: {s}")
+
+fn sum2(a: str, b: str) -> Result[int, str]:
+    let x = parse(a)?
+    let y = parse(b)?
+    return Ok(x + y)
+
+fn double(x: int) -> int:
+    return x * 2
+
+fn main():
+    let es = [Expr.Num(4), Expr.Add(2, 3), Expr.Neg(7), Expr.Nothing]
+    for e in es:
+        print(eval(e))
+    print(describe(0), describe(2), describe(-5), describe(99))
+    print(sum2("1", "2"), sum2("1", "zz"))
+    let o = Some(5)
+    print(o.map(double), o.unwrap_or(0), o.is_some())
+    let none: Option[int] = None
+    print(none.unwrap_or(-1), none.is_none(), none)
+    if o is Some(v) and v > 3:
+        print("big some", v)
+    print(es[1])
+#> 4
+#> 5
+#> -7
+#> 0
+#> zero small negative big
+#> Ok(3) Err("bad number: zz")
+#> Some(10) 5 true
+#> -1 true None
+#> big some 5
+#> Add(l=2, r=3)

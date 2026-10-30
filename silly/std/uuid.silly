@@ -1,0 +1,193 @@
+# Universally unique identifiers (RFC 9562), like Python's uuid.
+#
+#     import uuid
+#     fn main():
+#         print(uuid.uuid4().str())                    # e.g. 5b0c4c6e-8f0a-4d5e-9a1b-...
+#         print(uuid.uuid5(&uuid.namespace_dns(), &"python.org").str())
+#         # 886313e1-3b8a-5372-9b90-0c9aee199e5d
+#         let u = uuid.parse(&"{12345678-1234-5678-1234-567812345678}").unwrap()
+#         print(u.hex(), u.version())
+#
+# uuid4 is random, uuid7 is ordered by time and random after that (a good
+# database key), uuid1 is time plus a random node, and uuid3/uuid5 are names
+# hashed into a namespace (MD5 and SHA-1) so the same name always gives the same UUID.
+
+import hashlib
+import random
+import time
+
+# A 128-bit UUID.
+struct UUID:
+    bytes: list[u8]                 # 16 bytes, most significant first
+
+    # "12345678-1234-5678-1234-567812345678"
+    fn str(self) -> str:
+        let h = self.hex()
+        return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+
+    # 32 hex digits, no hyphens.
+    fn hex(self) -> str:
+        return hashlib.hex(&hashlib.from_bytes(&self.bytes))
+
+    # "urn:uuid:12345678-..."
+    fn urn(self) -> str:
+        return "urn:uuid:" + self.str()
+
+    # The version number (1 to 8) from the version bits; only meaningful for RFC UUIDs.
+    fn version(self) -> int:
+        return (self.bytes[6] >> 4) as int
+
+    # "rfc4122" for standard UUIDs, else "ncs", "microsoft" or "future".
+    fn variant(self) -> str:
+        let b = self.bytes[8] as int
+        if b & 0x80 == 0:
+            return "ncs"
+        if b & 0x40 == 0:
+            return "rfc4122"
+        if b & 0x20 == 0:
+            return "microsoft"
+        return "future"
+
+    # For uuid1 and uuid7: the creation time as a Unix timestamp in seconds.
+    fn time(self) -> f64:
+        if self.version() == 7:
+            return _int(&self.bytes, 0, 6) as f64 / 1000.0
+        if self.version() == 1:
+            let lo = _int(&self.bytes, 0, 4)
+            let mid = _int(&self.bytes, 4, 2)
+            let hi = _int(&self.bytes, 6, 2) & 0x0fff
+            let t = (hi << 48) | (mid << 32) | lo
+            return (t - _GREGORIAN) as f64 / 10000000.0
+        return 0.0
+
+    # -1, 0 or 1, comparing byte by byte (the same order as the strings).
+    fn compare(self, o: &UUID) -> int:
+        for i in 0..16:
+            if self.bytes[i] != o.bytes[i]:
+                return -1 if self.bytes[i] < o.bytes[i] else 1
+        return 0
+
+    fn is_nil(self) -> bool:
+        for b in self.bytes:
+            if b != 0:
+                return false
+        return true
+
+# 100-ns intervals from 1582-10-15 (the Gregorian calendar) to 1970-01-01.
+const _GREGORIAN: int = 0x01b21dd213814000
+
+fn _int(b: &list[u8], at: int, n: int) -> int:
+    var v = 0
+    for i in at..at + n:
+        v = (v << 8) | b[i] as int
+    return v
+
+fn _put(b: &mut list[u8], at: int, n: int, v: int):
+    for i in 0..n:
+        b[at + n - 1 - i] = ((v >> (8 * i)) & 255) as u8
+
+fn _random_bytes(n: int) -> list[u8]:
+    var out: list[u8] = []
+    while len(out) < n:
+        var r = random.os_u64()
+        for _ in 0..8:
+            if len(out) < n:
+                out.push((r & 255) as u8)
+            r = r >> 8
+    return out
+
+# Sets the version nibble and the RFC variant bits.
+fn _stamp(b: list[u8], version: int) -> UUID:
+    var x = b
+    x[6] = ((x[6] as int & 0x0f) | (version << 4)) as u8
+    x[8] = ((x[8] as int & 0x3f) | 0x80) as u8
+    return UUID(x)
+
+# A random UUID.
+fn uuid4() -> UUID:
+    return _stamp(_random_bytes(16), 4)
+
+# A UUID that starts with the current Unix time in milliseconds, so ones made
+# later sort after earlier ones.
+fn uuid7() -> UUID:
+    var b = _random_bytes(16)
+    _put(&mut b, 0, 6, time.time_ns() / 1000000)
+    return _stamp(b, 7)
+
+# A UUID from the current time and a random node (the 48-bit host part).
+fn uuid1() -> UUID:
+    let t = time.time_ns() / 100 + _GREGORIAN
+    var b = _random_bytes(16)
+    _put(&mut b, 0, 4, t & 0xffffffff)
+    _put(&mut b, 4, 2, (t >> 32) & 0xffff)
+    _put(&mut b, 6, 2, (t >> 48) & 0x0fff)
+    # A random node has the multicast bit set, so it can't clash with a real MAC address.
+    b[10] = (b[10] as int | 1) as u8
+    return _stamp(b, 1)
+
+fn _hashed(ns: &UUID, name: &str, version: int) -> UUID:
+    let data = hashlib.from_bytes(&ns.bytes) + name
+    let digest = hashlib.md5_bytes(&data) if version == 3 else hashlib.sha1_bytes(&data)
+    return _stamp(digest.bytes()[0:16], version)
+
+# The UUID for a name in a namespace, by MD5.
+fn uuid3(ns: &UUID, name: &str) -> UUID:
+    return _hashed(ns, name, 3)
+
+# The UUID for a name in a namespace, by SHA-1 (prefer this over uuid3).
+fn uuid5(ns: &UUID, name: &str) -> UUID:
+    return _hashed(ns, name, 5)
+
+# Parses 32 hex digits, with or without hyphens, braces or a "urn:uuid:" prefix.
+fn parse(s: &str) -> Result[UUID, str]:
+    var h = s.trim().lower()
+    if h.starts_with("urn:uuid:"):
+        h = h[9:]
+    if h.starts_with("{") and h.ends_with("}"):
+        h = h[1:len(h) - 1]
+    h = h.replace("-", "")
+    if len(h) != 32:
+        return Err("badly formed hexadecimal UUID string: '" + s + "'")
+    let digits = "0123456789abcdef"
+    var b: list[u8] = []
+    for i in 0..16:
+        let hi = digits.find(h[2 * i:2 * i + 1])
+        let lo = digits.find(h[2 * i + 1:2 * i + 2])
+        if hi.is_none() or lo.is_none():
+            return Err("badly formed hexadecimal UUID string: '" + s + "'")
+        b.push((hi.unwrap() * 16 + lo.unwrap()) as u8)
+    return Ok(UUID(b))
+
+# A UUID holding exactly these 16 bytes.
+fn from_bytes(b: &list[u8]) -> UUID:
+    if len(b) != 16:
+        panic("uuid.from_bytes needs 16 bytes, got " + str(len(b)))
+    return UUID(b.clone())
+
+fn _known(s: &str) -> UUID:
+    return parse(s).unwrap()
+
+# 00000000-0000-0000-0000-000000000000
+fn nil() -> UUID:
+    return from_bytes(&[0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+                        0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8])
+
+# ffffffff-ffff-ffff-ffff-ffffffffffff
+fn max_uuid() -> UUID:
+    return _known(&"ffffffff-ffff-ffff-ffff-ffffffffffff")
+
+# The namespaces from RFC 9562, for uuid3 and uuid5.
+fn namespace_dns() -> UUID:
+    return _known(&"6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+
+# The RFC 4122 namespace for URLs, for uuid3 and uuid5.
+fn namespace_url() -> UUID:
+    return _known(&"6ba7b811-9dad-11d1-80b4-00c04fd430c8")
+
+# The RFC 4122 namespace for ISO OIDs.
+fn namespace_oid() -> UUID:
+    return _known(&"6ba7b812-9dad-11d1-80b4-00c04fd430c8")
+
+# The RFC 4122 namespace for X.500 names.
+fn namespace_x500() -> UUID:
+    return _known(&"6ba7b814-9dad-11d1-80b4-00c04fd430c8")

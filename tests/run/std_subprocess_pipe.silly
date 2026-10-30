@@ -1,0 +1,10 @@
+# A child that exits without reading a large input must not kill us (SIGPIPE).
+
+import subprocess
+fn main():
+    var big = ""
+    for i in 0..50000:
+        big = big + "xxxxxxxxxxxxxxxxxxx\n"
+    print(subprocess.run_input("true", big).code, "survived")
+
+#> 0 survived

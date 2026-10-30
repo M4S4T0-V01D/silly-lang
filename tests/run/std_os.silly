@@ -1,0 +1,30 @@
+# The os module: files, directories, environment, processes.
+
+import os
+fn main():
+    print(os.getcwd() != "", os.getpid() > 0, os.sysname() != "")
+    let d = os.mkdtemp("silly_").unwrap()
+    os.makedirs(d + "/a/b/c").unwrap()
+    os.write(d + "/a/x.txt", "hello").unwrap()
+    os.append(d + "/a/x.txt", " world").unwrap()
+    print(os.read(d + "/a/x.txt").unwrap(), os.file_size(d + "/a/x.txt").unwrap())
+    print(os.listdir(d + "/a").unwrap())
+    print(os.is_dir(d + "/a/b"), os.is_file(d + "/a/x.txt"), os.exists(d + "/nope"))
+    match os.listdir(d + "/nope"):
+        case Ok(_): print("??")
+        case Err(e): print("err", e)
+    os.setenv("SILLY_T", "42").unwrap()
+    print(os.getenv("SILLY_T"), os.getenv("SILLY_NOPE_X"), os.environ()["SILLY_T"])
+    let w = os.walk(d).unwrap()
+    print(len(w), w[0].ends_with("/a/x.txt"))
+    os.remove_all(d).unwrap()
+    print(os.exists(d), os.system("exit 3"))
+
+#> true true true
+#> hello world 11
+#> ["b", "x.txt"]
+#> true true false
+#> err No such file or directory
+#> Some("42") None 42
+#> 1 true
+#> false 3

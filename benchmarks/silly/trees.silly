@@ -1,0 +1,43 @@
+# Binary trees (the Benchmarks Game workload). Silly has no heap pointers, so a
+# tree is a list of (left, right) index pairs; each tree is one buffer on the
+# data stack, reclaimed when the loop iteration that built it ends.
+
+fn build(ns: &mut list[(i32, i32)], d: int) -> i32:
+    if d == 0:
+        ns.push((-1, -1))
+    else:
+        let l = build(&mut ns, d - 1)
+        let r = build(&mut ns, d - 1)
+        ns.push((l, r))
+    return (len(ns) - 1) as i32
+
+fn check(ns: &list[(i32, i32)], i: i32) -> int:
+    let (l, r) = ns[i as int]
+    if l < 0:
+        return 1
+    return 1 + check(ns, l) + check(ns, r)
+
+fn tree(d: int) -> list[(i32, i32)]:
+    var ns: list[(i32, i32)] = []
+    build(&mut ns, d)
+    return ns
+
+fn tree_check(d: int) -> int:
+    let t = tree(d)
+    return check(&t, (len(t) - 1) as i32)
+
+fn main():
+    let a = args()
+    let n = a[1].parse_int().unwrap() if len(a) > 1 else 10
+    let maxd = max(6, n)
+    print(f"stretch tree of depth {maxd + 1}\t check: {tree_check(maxd + 1)}")
+    let long = tree(maxd)
+    var d = 4
+    while d <= maxd:
+        let iters = 1 << (maxd - d + 4)
+        var sum = 0
+        for _ in 0..iters:
+            sum += tree_check(d)
+        print(f"{iters}\t trees of depth {d}\t check: {sum}")
+        d += 2
+    print(f"long lived tree of depth {maxd}\t check: {check(&long, (len(long) - 1) as i32)}")

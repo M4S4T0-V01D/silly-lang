@@ -1,0 +1,7 @@
+# error: is also borrowed in the same call
+fn f(a: &mut list[int], b: &list[int]):
+    a.push(len(b))
+
+fn main():
+    var xs = [1]
+    f(&mut xs, &xs)

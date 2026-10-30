@@ -1,0 +1,198 @@
+# Clocks, sleeping, and calendar dates and times.
+#
+#     import time
+#     fn main():
+#         let t0 = time.perf_counter()
+#         time.sleep(0.25)
+#         print(f"took {time.perf_counter() - t0:.2f}s")
+#         let now = time.now()
+#         print(now.format("%Y-%m-%d %H:%M"), now.weekday_name())
+#         let d = time.date(2024, 2, 28).add_days(2)
+#         print(d.iso())      # 2024-03-01T00:00:00
+
+extern "os.c"
+
+extern fn os_time() -> f64
+extern fn os_time_ns() -> int
+extern fn os_monotonic_ns() -> int
+extern fn os_sleep(s: f64)
+extern fn os_tm(t: int, local: bool, field: int) -> int
+extern fn os_strftime(fmt: str, t: int, local: bool) -> str
+extern fn os_mktime(y: int, mo: int, d: int, h: int, mi: int, s: int, local: bool) -> int
+
+# Seconds since the Unix epoch, as a float.
+fn time() -> f64:
+    return os_time()
+
+# Nanoseconds since the Unix epoch.
+fn time_ns() -> int:
+    return os_time_ns()
+
+# A clock that never goes backwards, for measuring intervals (seconds).
+fn monotonic() -> f64:
+    return (os_monotonic_ns() as f64) / 1000000000.0
+
+# Nanoseconds on a clock that never goes back (for intervals).
+fn monotonic_ns() -> int:
+    return os_monotonic_ns()
+
+# Seconds on the monotonic clock, as f64, for timing code.
+fn perf_counter() -> f64:
+    return monotonic()
+
+# Pauses this thread for seconds.
+fn sleep(seconds: f64):
+    os_sleep(seconds)
+
+# A calendar date and time to the second, in local time or UTC.
+struct DateTime:
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    weekday: int      # 0 = Monday ... 6 = Sunday
+    yearday: int      # 1 ... 366
+    offset: int       # seconds east of UTC
+    local: bool
+    stamp: int        # the Unix timestamp this is
+
+    # The Unix timestamp in seconds.
+    fn timestamp(self) -> int:
+        return self.stamp
+
+    # Formats with strftime codes: %Y %m %d %H %M %S %A %a %B %b %j %Z %z %%...
+    fn format(self, fmt: str) -> str:
+        return os_strftime(fmt, self.stamp, self.local)
+
+    # "2024-03-01T12:30:00"
+    fn iso(self) -> str:
+        return os_strftime("%Y-%m-%dT%H:%M:%S", self.stamp, self.local)
+
+    fn date_str(self) -> str:
+        return os_strftime("%Y-%m-%d", self.stamp, self.local)
+
+    fn time_str(self) -> str:
+        return os_strftime("%H:%M:%S", self.stamp, self.local)
+
+    fn weekday_name(self) -> str:
+        return weekday_names()[self.weekday]
+
+    fn month_name(self) -> str:
+        return month_names()[self.month - 1]
+
+    fn add_seconds(self, s: int) -> DateTime:
+        return _at(self.stamp + s, self.local)
+
+    fn add_minutes(self, m: int) -> DateTime:
+        return _at(self.stamp + m * 60, self.local)
+
+    fn add_hours(self, h: int) -> DateTime:
+        return _at(self.stamp + h * 3600, self.local)
+
+    # Moves by whole calendar days, keeping the wall-clock time in local time.
+    fn add_days(self, d: int) -> DateTime:
+        let t = os_mktime(self.year, self.month, self.day + d, self.hour, self.minute, self.second, self.local)
+        return _at(t, self.local)
+
+    # Seconds from `other` to this one.
+    fn since(self, other: DateTime) -> int:
+        return self.stamp - other.stamp
+
+    fn to_utc(self) -> DateTime:
+        return _at(self.stamp, false)
+
+    fn to_local(self) -> DateTime:
+        return _at(self.stamp, true)
+
+    fn is_before(self, other: DateTime) -> bool:
+        return self.stamp < other.stamp
+
+# Monday to Sunday.
+fn weekday_names() -> list[str]:
+    return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+# January to December.
+fn month_names() -> list[str]:
+    return ["January", "February", "March", "April", "May", "June", "July", "August",
+            "September", "October", "November", "December"]
+
+fn _at(t: int, local: bool) -> DateTime:
+    return DateTime(os_tm(t, local, 0), os_tm(t, local, 1), os_tm(t, local, 2), os_tm(t, local, 3),
+                    os_tm(t, local, 4), os_tm(t, local, 5), os_tm(t, local, 6), os_tm(t, local, 7),
+                    os_tm(t, local, 8), local, t)
+
+# The current local date and time.
+fn now() -> DateTime:
+    return _at(os_time_ns() / 1000000000, true)
+
+# The current date and time in UTC.
+fn utcnow() -> DateTime:
+    return _at(os_time_ns() / 1000000000, false)
+
+# A local DateTime for a Unix timestamp.
+fn from_timestamp(t: int) -> DateTime:
+    return _at(t, true)
+
+# The UTC date and time t seconds after the epoch.
+fn utc_from_timestamp(t: int) -> DateTime:
+    return _at(t, false)
+
+# Local midnight at the start of a date. Out-of-range days roll over (Jan 32 = Feb 1).
+fn date(year: int, month: int, day: int) -> DateTime:
+    return _at(os_mktime(year, month, day, 0, 0, 0, true), true)
+
+# A DateTime from its parts (UTC).
+fn datetime(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime:
+    return _at(os_mktime(year, month, day, hour, minute, second, true), true)
+
+# The same, in UTC.
+fn utc(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime:
+    return _at(os_mktime(year, month, day, hour, minute, second, false), false)
+
+# Parses "YYYY-MM-DD", "YYYY-MM-DD HH:MM[:SS]" or the same with a "T" (as local time).
+fn parse_iso(s: &str) -> Option[DateTime]:
+    let t = s.trim()
+    if len(t) < 10 or t[4:5] != "-" or t[7:8] != "-":
+        return None
+    let y = t[0:4].parse_int()
+    let mo = t[5:7].parse_int()
+    let d = t[8:10].parse_int()
+    if y.is_none() or mo.is_none() or d.is_none():
+        return None
+    var h = 0
+    var mi = 0
+    var sec = 0
+    if len(t) > 10:
+        if len(t) < 16 or (t[10:11] != "T" and t[10:11] != " ") or t[13:14] != ":":
+            return None
+        match t[11:13].parse_int():
+            case Some(v): h = v
+            case None: return None
+        match t[14:16].parse_int():
+            case Some(v): mi = v
+            case None: return None
+        if len(t) >= 19 and t[16:17] == ":":
+            match t[17:19].parse_int():
+                case Some(v): sec = v
+                case None: return None
+    let mon = mo.unwrap()
+    let day = d.unwrap()
+    if mon < 1 or mon > 12 or day < 1 or day > days_in_month(y.unwrap(), mon):
+        return None
+    return Some(datetime(y.unwrap(), mon, day, h, mi, sec))
+
+# Whether year has a February 29th.
+fn is_leap(year: int) -> bool:
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+
+# 28 to 31.
+fn days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        if is_leap(year):
+            return 29
+        return 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31

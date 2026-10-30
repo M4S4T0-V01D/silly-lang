@@ -1,0 +1,36 @@
+# uuid: v1/v3/v4/v5/v7, parsing, namespaces (v3/v5 checked against Python)
+
+import uuid
+import time
+fn main():
+    for n in ["python.org", "", "héllo"]:
+        print(uuid.uuid5(&uuid.namespace_dns(), &n).str(), uuid.uuid3(&uuid.namespace_url(), &n).str())
+    print(uuid.uuid5(&uuid.namespace_oid(), &"1.2").str(), uuid.uuid3(&uuid.namespace_x500(), &"cn=x").str())
+    let u = uuid.parse(&"{12345678-1234-5678-1234-567812345678}").unwrap()
+    print(u.hex(), u.urn(), u.version(), u.variant(), u.compare(&uuid.nil()), uuid.nil().is_nil())
+    print(uuid.parse(&"URN:UUID:12345678123456781234567812345678").unwrap().str(), uuid.max_uuid().str())
+    for bad in ["123", "12345678-1234-5678-1234-56781234567g"]:
+        match uuid.parse(&bad):
+            case Ok(_): print("ok?")
+            case Err(e): print(e)
+    let a = uuid.uuid4()
+    let b = uuid.uuid4()
+    print(a.version(), a.variant(), a.compare(&b) != 0, len(a.str()), uuid.parse(&a.str()).unwrap() == a.clone())
+    let t0 = time.time()
+    let s = uuid.uuid7()
+    let s2 = uuid.uuid7()
+    print(s.version(), s.variant(), (s.time() - t0).abs() < 2.0, s.compare(&s2) <= 0 or s.time() == s2.time())
+    let one = uuid.uuid1()
+    print(one.version(), one.variant(), (one.time() - t0).abs() < 2.0)
+
+#> 886313e1-3b8a-5372-9b90-0c9aee199e5d 22fe6191-c161-3d86-a432-a81f343eda08
+#> 4ebd0208-8328-5d69-8c44-ec50939c0967 14cdb9b4-de01-3faa-aff5-65bc2f771745
+#> 5ca283f8-ff14-58cb-ba86-bf52120a3414 b620d177-d6bd-332b-947f-7d8c426bb304
+#> b4fe3335-a2ae-5c75-889c-b1247a0f6f02 dcc2172c-a229-3944-aa35-482747f1711b
+#> 12345678123456781234567812345678 urn:uuid:12345678-1234-5678-1234-567812345678 5 ncs 1 true
+#> 12345678-1234-5678-1234-567812345678 ffffffff-ffff-ffff-ffff-ffffffffffff
+#> badly formed hexadecimal UUID string: '123'
+#> badly formed hexadecimal UUID string: '12345678-1234-5678-1234-56781234567g'
+#> 4 rfc4122 true 36 true
+#> 7 rfc4122 true true
+#> 1 rfc4122 true

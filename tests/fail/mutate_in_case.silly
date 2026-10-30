@@ -1,0 +1,12 @@
+# error: borrowed by the `case`
+enum Box:
+    Full(list[int])
+    Empty
+
+fn main():
+    var b = Box.Full([1])
+    match b:
+        case Full(xs):
+            b = Box.Empty
+            print(xs)
+        case Empty: print(0)

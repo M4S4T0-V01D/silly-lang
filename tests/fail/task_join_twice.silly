@@ -1,0 +1,5 @@
+# error: was moved
+fn main():
+    let t = spawn(fn() => 1)
+    print(t.join())
+    print(t.join())

@@ -1,0 +1,98 @@
+# csv: parsing and writing, checked against Python's csv
+
+import csv
+
+fn main():
+    let rows = csv.parse("name,qty\r\npen,\"1,5\"\r\n")
+    print(rows)
+    for r in csv.parse_dicts("name,qty\npen,3\n\nink\n"):
+        print(r["name"], r["qty"], len(r))
+    print(csv.format(&[["a", "b c"], ["x,y", "say \"hi\""]]))
+    var a: map[str, str] = {}
+    a["qty"] = "2"
+    a["name"] = "cup"
+    var b: map[str, str] = {}
+    b["name"] = "lid"
+    print(csv.format_dicts_with(&["name", "qty"], &[a, b], &csv.unix()))
+    rest()
+
+fn rest():
+    print(csv.parse("\"abc"))
+    print(csv.parse("a\"b,c"))
+    print(csv.parse("\"ab\"c,d"))
+    print(csv.parse("a\n\nb\n"))
+    print(csv.parse("a,b\r\nc,\"x\r\ny\"\r\n"))
+    print(csv.parse("x,"))
+    print(csv.parse(","))
+    print(csv.parse("\"\""))
+    print(csv.parse("a\rb"))
+    print(csv.parse(" \"a\" ,b"))
+    print(csv.parse(""))
+    print(csv.parse("\n"))
+    print(csv.parse("a,\"\",b"))
+    print(csv.parse("\"a\"\"b\",c"))
+    print(csv.parse("é,😀\n\"q,é\""))
+    print(csv.parse("a\tb\t\"c\td\""))
+    print(csv.parse("\"ab\"x\"y,z"))
+    print(csv.parse("1,2\n3"))
+    print(csv.parse_with("a\tb\t\"c\td\"", &csv.tsv()))
+    print("a,\"b,c\",\"q\"\"t\",,\"l\nm\", sp\r\n" == csv.format_row(&["a", "b,c", "q\"t", "", "l\nm", " sp"], &csv.excel()))
+    print("\"a\",\"b,c\",\"q\"\"t\",\"\",\"l\nm\",\" sp\"\n" == csv.format_row(&["a", "b,c", "q\"t", "", "l\nm", " sp"], &csv.unix()))
+    print(csv.parse(&csv.format(&[["a", "b,c", "q\"t", "", "l\nm", " sp"]])) == [["a", "b,c", "q\"t", "", "l\nm", " sp"]])
+    print("\"\"\r\n" == csv.format_row(&[""], &csv.excel()))
+    print("\"\"\n" == csv.format_row(&[""], &csv.unix()))
+    print(csv.parse(&csv.format(&[[""]])) == [[""]])
+    print("\r\n" == csv.format_row(&[], &csv.excel()))
+    print("\n" == csv.format_row(&[], &csv.unix()))
+    print(csv.parse(&csv.format(&[[]])) == [[]])
+    print("x\r\n" == csv.format_row(&["x"], &csv.excel()))
+    print("\"x\"\n" == csv.format_row(&["x"], &csv.unix()))
+    print(csv.parse(&csv.format(&[["x"]])) == [["x"]])
+    print("é,\"a\rb\"\r\n" == csv.format_row(&["é", "a\rb"], &csv.excel()))
+    print("\"é\",\"a\rb\"\n" == csv.format_row(&["é", "a\rb"], &csv.unix()))
+    print(csv.parse(&csv.format(&[["é", "a\rb"]])) == [["é", "a\rb"]])
+
+#> [["name", "qty"], ["pen", "1,5"]]
+#> pen 3 2
+#> ink  2
+#> a,b c
+#> "x,y","say ""hi"""
+#>
+#> "name","qty"
+#> "cup","2"
+#> "lid",""
+#>
+#> [["abc"]]
+#> [["a\"b", "c"]]
+#> [["abc", "d"]]
+#> [["a"], [], ["b"]]
+#> [["a", "b"], ["c", "x\r\ny"]]
+#> [["x", ""]]
+#> [["", ""]]
+#> [[""]]
+#> [["a"], ["b"]]
+#> [[" \"a\" ", "b"]]
+#> []
+#> [[]]
+#> [["a", "", "b"]]
+#> [["a\"b", "c"]]
+#> [["é", "😀"], ["q,é"]]
+#> [["a\tb\t\"c\td\""]]
+#> [["abx\"y", "z"]]
+#> [["1", "2"], ["3"]]
+#> [["a", "b", "c\td"]]
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true

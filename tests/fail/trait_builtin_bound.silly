@@ -1,0 +1,5 @@
+# error: list[i64] does not implement Hash
+fn h[T: Hash](x: T) -> T:
+    return x
+fn main():
+    print(h([1, 2]))

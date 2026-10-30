@@ -1,0 +1,15 @@
+# Compound assignment and integer division semantics.
+fn main():
+    var y = 17
+    y //= 5
+    var z = -17
+    z //= 5
+    var w = -17
+    w %= 5
+    var t = -17
+    t /= 5
+    print(y, z, w, t, 0o17, ~5, 2 ** 10)
+    let xs = [1, 2, 3]
+    print(xs[-1], xs[-3])
+#> 3 -4 3 -3 15 -6 1024
+#> 3 1

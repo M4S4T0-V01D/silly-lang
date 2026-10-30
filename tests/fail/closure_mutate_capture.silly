@@ -1,0 +1,6 @@
+# error: cannot modify captured variable
+fn main():
+    var n = 1
+    let f = fn():
+        n += 1
+    f()

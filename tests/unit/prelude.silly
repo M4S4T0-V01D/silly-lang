@@ -1,0 +1,47 @@
+import math
+
+@test
+fn option_methods():
+    let a = Some(3)
+    let b: Option[int] = None
+    assert a.unwrap() == 3
+    assert b.unwrap_or(9) == 9
+    assert a.ok_or("x").is_ok()
+    assert b.ok_or("x").is_err()
+
+@test
+fn math_fns():
+    assert math.gcd(48, 18) == 6
+    assert math.clamp(15, 0, 10) == 10
+    assert math.fabs(math.sqrt(2.0) * math.sqrt(2.0) - 2.0) < 1e-12
+
+@test
+fn list_methods():
+    var xs = [3, 1, 2]
+    xs.sort()
+    assert xs == [1, 2, 3]
+    xs.reverse()
+    assert xs == [3, 2, 1]
+    xs.insert(0, 7)
+    assert xs.pop() == 1
+    assert xs.index_of(2) == Some(2)
+    assert xs.contains(7) and not xs.contains(42)
+    xs.remove(0)
+    assert xs == [3, 2]
+    xs.extend([5, 6])
+    assert len(xs) == 4 and xs.first() == Some(3) and xs.last() == Some(6)
+    xs.truncate(1)
+    assert xs == [3]
+    xs.clear()
+    assert len(xs) == 0 and xs.is_empty()
+    assert sum([1, 2, 3]) == 6
+
+@test
+fn floored_modulo():
+    assert -7 % 2 == 1
+    assert 7 % -2 == -1
+    assert -7 // 2 == -4
+    assert -7 / 2 == -3
+    var a = -7
+    assert a % 3 == 2 and a // 3 == -3
+    assert -7.5 % 2.0 == 0.5

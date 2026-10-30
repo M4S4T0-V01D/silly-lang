@@ -1,0 +1,8 @@
+# error: is moved inside a loop
+fn eat(xs: list[int]):
+    print(xs)
+
+fn main():
+    let xs = [1]
+    for i in 0..3:
+        eat(xs)

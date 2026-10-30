@@ -1,0 +1,50 @@
+# How Silly manages memory without a heap.
+#
+# Every list, string and map lives on the data stack. Growing a value bumps a
+# pointer; leaving a scope pops everything the scope made. The compiler
+# decides when that is safe, so none of this needs annotations.
+
+# A function returning a list keeps its buffer: it is built in the caller's
+# region, and the caller's scope reclaims it.
+fn evens(n: int) -> list[int]:
+    var out: list[int] = []
+    for i in 0..n:
+        if i % 2 == 0:
+            out.push(i)
+    return out
+
+# Scratch values made while building the result would also stay alive until
+# the caller's scope ends. @compact moves the result down over the scratch
+# space before returning, so only the result survives.
+@compact
+fn labels(n: int) -> list[str]:
+    var out: list[str] = []
+    for i in 0..n:
+        let tmp = f"<{i}>" + "-" * (i % 3)
+        out.push(tmp.upper())
+    return out
+
+fn main():
+    # 1. Loop iterations are reclaimed: `xs` is freed at the end of each pass.
+    var total = 0
+    for round in 0..1_000_000:
+        let xs = evens(1000)
+        total += xs[len(xs) - 1]
+    print("sum of last elements:", total)
+
+    # 2. A value assigned to an outer variable from inside a loop survives;
+    #    the compiler sees the escape and stops resetting that loop.
+    var keep: list[int] = []
+    for round in 0..3:
+        keep = evens(round + 5)
+    print("kept:", keep)
+
+    # 3. Scratch-free results via @compact.
+    print(labels(4))
+
+    # 4. Safety: a borrowed view cannot outlive or change what it views.
+    #    Uncomment either line to see the compile-time error.
+    var names = ["ada", "grace"]
+    for n in names:
+        # names.push(n)          # error: cannot modify 'names' while it is being iterated
+        print(n.upper())

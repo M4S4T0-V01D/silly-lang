@@ -1,0 +1,232 @@
+# Unit tests, like Python's unittest.
+#
+#     import testing
+#
+#     fn test_add() -> Result[bool, str]:
+#         testing.eq(1 + 1, 2)?
+#         testing.check(len("ab") == 2, "len")?
+#         return testing.ok()
+#
+#     fn main():
+#         var s = testing.suite("math")
+#         s.run("test_add", test_add)
+#         s.skip("test_slow", "takes a minute")
+#         s.exit()                 # prints the report, exits 1 if anything failed
+#
+# A test returns Ok to pass or Err(message) to fail; each assertion returns a
+# Result, so `?` stops the test at the first failed one. A panic stops the whole
+# program, not just the test.
+#
+# The program's arguments pick what runs: -v lists each test by name, -q prints
+# only failures, and any other argument runs just the tests whose names contain
+# it (like unittest -k). Progress and the report go to stderr.
+
+import string
+import sys
+import time
+
+# The way a value looks inside a list: strings in quotes, so "1" and 1 differ.
+fn repr[X](x: &X) -> str:
+    let s = str([x.clone()])
+    return s[1:len(s) - 1]
+
+fn _fail(msg: &str, note: &str) -> Result[bool, str]:
+    if note == "":
+        return Err(msg.clone())
+    return Err(msg + " : " + note)
+
+# Passes.
+fn ok() -> Result[bool, str]:
+    return Ok(true)
+
+# Always fails.
+fn fail(msg: str) -> Result[bool, str]:
+    return Err(msg)
+
+# Fails with msg unless cond holds.
+fn check(cond: bool, msg: str) -> Result[bool, str]:
+    if cond:
+        return Ok(true)
+    return Err(msg)
+
+# Fails unless cond holds.
+fn is_true(cond: bool) -> Result[bool, str]:
+    return check(cond, "false is not true")
+
+# Fails if cond holds.
+fn is_false(cond: bool) -> Result[bool, str]:
+    return check(not cond, "true is not false")
+
+# Fails unless a == b, showing both.
+fn eq[X: Eq](a: X, b: X) -> Result[bool, str]:
+    if a == b:
+        return Ok(true)
+    return Err(repr(&a) + " != " + repr(&b))
+
+# Fails if a == b.
+fn ne[X: Eq](a: X, b: X) -> Result[bool, str]:
+    if a != b:
+        return Ok(true)
+    return Err(repr(&a) + " == " + repr(&b))
+
+# eq with a note added to the failure message.
+fn eq_msg[X: Eq](a: X, b: X, note: str) -> Result[bool, str]:
+    if a == b:
+        return Ok(true)
+    return _fail(&(repr(&a) + " != " + repr(&b)), &note)
+
+# Fails unless a < b.
+fn lt[X: Ord](a: X, b: X) -> Result[bool, str]:
+    return check(a < b, repr(&a) + " not less than " + repr(&b))
+
+# Fails unless a <= b.
+fn le[X: Ord](a: X, b: X) -> Result[bool, str]:
+    return check(a <= b, repr(&a) + " not less than or equal to " + repr(&b))
+
+# Fails unless a > b.
+fn gt[X: Ord](a: X, b: X) -> Result[bool, str]:
+    return check(a > b, repr(&a) + " not greater than " + repr(&b))
+
+# Fails unless a >= b.
+fn ge[X: Ord](a: X, b: X) -> Result[bool, str]:
+    return check(a >= b, repr(&a) + " not greater than or equal to " + repr(&b))
+
+# Whether two floats agree to within tol.
+fn near(a: f64, b: f64, tol: f64) -> Result[bool, str]:
+    let d = a - b
+    if d <= tol and -d <= tol:
+        return Ok(true)
+    return Err(str(a) + " != " + str(b) + " within " + str(tol) + " delta (" + str(d.abs()) + " difference)")
+
+# Fails unless x is in xs.
+fn contains[X: Eq](xs: &list[X], x: X) -> Result[bool, str]:
+    return check(xs.contains(x.clone()), repr(&x) + " not found in " + str(xs))
+
+# Fails if x is in xs.
+fn not_contains[X: Eq](xs: &list[X], x: X) -> Result[bool, str]:
+    return check(not xs.contains(x.clone()), repr(&x) + " unexpectedly found in " + str(xs))
+
+# Fails unless part occurs in s.
+fn str_contains(s: &str, part: &str) -> Result[bool, str]:
+    return check(s.contains(part.clone()), repr(part) + " not found in " + repr(s))
+
+# Fails unless r is Ok.
+fn is_ok[X, E](r: &Result[X, E]) -> Result[bool, str]:
+    match r:
+        case Ok(_): return Ok(true)
+        case Err(e): return Err("expected Ok, got Err(" + repr(&e) + ")")
+
+# Fails unless r is Err.
+fn is_err[X, E](r: &Result[X, E]) -> Result[bool, str]:
+    match r:
+        case Ok(v): return Err("expected Err, got Ok(" + repr(&v) + ")")
+        case Err(_): return Ok(true)
+
+# Fails unless o is Some.
+fn is_some[X](o: &Option[X]) -> Result[bool, str]:
+    return check(o.is_some(), "expected Some, got None")
+
+# Fails unless o is None.
+fn is_none[X](o: &Option[X]) -> Result[bool, str]:
+    match o:
+        case Some(v): return Err("expected None, got Some(" + repr(&v) + ")")
+        case None: return Ok(true)
+
+# ---- running tests ----
+
+# A named group of tests (see suite()); run each with run(), then exit().
+struct Suite:
+    name: str
+    verbosity: int                  # 0 quiet, 1 dots, 2 names
+    pattern: str                    # run only names containing this
+    ran: int
+    skipped: int
+    failures: list[(str, str)]      # (test name, message)
+    started: f64
+
+    # Whether a test with this name would run.
+    fn selected(self, name: &str) -> bool:
+        return self.pattern == "" or name.contains(self.pattern.clone())
+
+    fn _progress(self, name: &str, word: str, dot: str):
+        if self.verbosity >= 2:
+            sys.stderr(name + " ... " + word + "\n")
+        elif self.verbosity == 1:
+            sys.stderr(dot)
+
+    fn run(mut self, name: str, f: fn() -> Result[bool, str]):
+        if not self.selected(&name):
+            return
+        self.ran += 1
+        match f():
+            case Ok(_):
+                self._progress(&name, "ok", ".")
+            case Err(e):
+                self._progress(&name, "FAIL", "F")
+                self.failures.push((name, e))
+
+    fn skip(mut self, name: str, reason: str):
+        if not self.selected(&name):
+            return
+        self.ran += 1
+        self.skipped += 1
+        self._progress(&name, "skipped " + repr(&reason), "s")
+
+    fn passed(self) -> bool:
+        return len(self.failures) == 0
+
+    # The text printed at the end. With timed false, "Ran N tests" has no time,
+    # so the report is the same every run.
+    fn report(self, timed: bool) -> str:
+        var out = ""
+        let line = string.pad_right(&"", 70, '-')
+        let dline = string.pad_right(&"", 70, '=')
+        for (name, msg) in self.failures:
+            out += dline + "\nFAIL: " + name + " (" + self.name + ")\n" + line + "\n" + msg + "\n\n"
+        out += line + "\nRan " + str(self.ran) + " test" + ("" if self.ran == 1 else "s")
+        if timed:
+            out += " in " + _secs(time.time() - self.started)
+        out += "\n\n"
+        var notes: list[str] = []
+        if len(self.failures) > 0:
+            notes.push("failures=" + str(len(self.failures)))
+        if self.skipped > 0:
+            notes.push("skipped=" + str(self.skipped))
+        out += "OK" if self.passed() else "FAILED"
+        if len(notes) > 0:
+            out += " (" + ", ".join(notes) + ")"
+        return out + "\n"
+
+    # Prints the report to stderr and returns the exit code (0 or 1).
+    fn finish(self) -> int:
+        if self.verbosity == 1 and self.ran > 0:
+            sys.stderr("\n")
+        sys.stderr(self.report(true))
+        return 0 if self.passed() else 1
+
+    # finish, then exit with its code.
+    fn exit(self):
+        sys.exit(self.finish())
+
+fn _secs(s: f64) -> str:
+    let ms = (s * 1000.0).round() as int
+    return str(ms / 1000) + "." + str(ms % 1000 + 1000)[1:] + "s"
+
+# A suite set up from the program's arguments (-v, -q, a name filter).
+fn suite(name: str) -> Suite:
+    return suite_with(name, &sys.argv()[1:])
+
+# A suite set up from these arguments instead.
+fn suite_with(name: str, args: &list[str]) -> Suite:
+    var verbosity = 1
+    var pattern = ""
+    for a in args:
+        if a == "-v" or a == "--verbose":
+            verbosity = 2
+        elif a == "-q" or a == "--quiet":
+            verbosity = 0
+        elif a == "-k" or a == "--":
+            continue
+        else:
+            pattern = a.clone()
+    return Suite(name, verbosity, pattern, 0, 0, [], time.time())

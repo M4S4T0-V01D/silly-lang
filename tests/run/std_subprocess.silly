@@ -1,0 +1,27 @@
+# The subprocess module: capture, input, quoting.
+
+import subprocess
+fn main():
+    let r = subprocess.run("echo out; echo err >&2; exit 4")
+    print(r.code, r.stdout, r.stderr, r.ok())
+    print(subprocess.output(&["echo", "it's", "a b"]))
+    print(subprocess.run_input("tr a-z A-Z", "shout\n").stdout)
+    print(subprocess.run("false").check())
+    print(subprocess.quote("it's"), subprocess.quote("plain-1.txt"), subprocess.join(&["a b", "$x"]))
+    var big = ""
+    for i in 0..20000:
+        big = big + "line\n"
+    let w = subprocess.run_input("wc -l", big)
+    print(w.stdout.trim())
+    print(subprocess.call("exit 2"))
+
+#> 4 out
+#>  err
+#>  false
+#> Ok("it's a b\n")
+#> SHOUT
+#>
+#> Err("command failed with status 1")
+#> 'it'\''s' plain-1.txt 'a b' '$x'
+#> 20000
+#> 2

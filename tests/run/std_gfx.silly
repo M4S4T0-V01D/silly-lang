@@ -1,0 +1,81 @@
+# std gfx on the headless backend: drawing, blending, text metrics, images, events.
+#> headless
+#> ff0000ff ff0000ff 00000000 7fff0000
+#> 255 127 127
+#> corner 0 edge 255 inside 255
+#> line true mid true end false
+#> tri true out false
+#> 17 13 21 32 true
+#> 0 4 6 1
+#> Some(4294936576) Some(4278255360) None
+#> loaded 3x2 ff112233 ff445566
+#> resize 5 4 ff0000ff 00000000
+#> clip 00000000 ff00ff00
+#> events ["Quit"]
+
+import gfx
+
+fn h(c: int) -> str:
+    let digits = "0123456789abcdef"
+    var s = ""
+    for i in 0..8:
+        let d = (c >> ((7 - i) * 4)) & 15
+        s += digits[d:d + 1]
+    return s
+
+fn main():
+    let win = gfx.open("test", 64, 48)
+    print(win.backend())
+
+    let c = gfx.canvas(10, 10)
+    c.fill_rect(0, 0, 4, 4, gfx.rgb(0, 0, 255))
+    c.fill_rect(5, 5, 2, 2, gfx.rgba(255, 0, 0, 127))
+    print(h(c.pixel(0, 0)), h(c.pixel(3, 3)), h(c.pixel(4, 4)), h(c.pixel(5, 5)))
+    c.clear(gfx.WHITE)
+    c.fill_rect(0, 0, 1, 1, gfx.rgba(255, 0, 0, 128))
+    let p = c.pixel(0, 0)
+    print(gfx.red_of(p), gfx.green_of(p), gfx.blue_of(p))
+
+    let r = gfx.canvas(20, 20)
+    r.fill_round_rect(0, 0, 20, 20, 6, gfx.BLACK)
+    print("corner", gfx.alpha_of(r.pixel(0, 0)), "edge", gfx.alpha_of(r.pixel(10, 0)), "inside", gfx.alpha_of(r.pixel(10, 10)))
+
+    let l = gfx.canvas(20, 20)
+    l.line(2.0, 2.0, 12.0, 12.0, 2.0, gfx.BLACK)
+    print("line", l.pixel(7, 7) != 0, "mid", l.pixel(2, 2) != 0, "end", l.pixel(16, 16) != 0)
+    l.clear(0)
+    l.fill_triangle(0.0, 0.0, 20.0, 0.0, 0.0, 20.0, gfx.BLACK)
+    print("tri", gfx.alpha_of(l.pixel(3, 3)) == 255, "out", l.pixel(17, 17) != 0)
+
+    print(gfx.font_height(gfx.FONT_SANS), gfx.font_ascent(gfx.FONT_SANS), gfx.font_height(gfx.FONT_HEADING),
+          gfx.font_height(gfx.FONT_TITLE), gfx.text_width("ab", gfx.FONT_MONO) == 2 * gfx.text_width("i", gfx.FONT_MONO))
+    let w = gfx.text_width("abcd", gfx.FONT_MONO)
+    print(gfx.text_index("abcd", gfx.FONT_MONO, 0), gfx.text_index("abcd", gfx.FONT_MONO, w),
+          gfx.text_index("abcdé", gfx.FONT_MONO, w + 100), gfx.text_index("abcd", gfx.FONT_MONO, w / 4 - 1))
+    print(gfx.hex("#f80"), gfx.hex("00ff00"), gfx.hex("#12"))
+
+    let img = gfx.canvas(3, 2)
+    img.set_pixel(0, 0, 0xFF112233)
+    img.set_pixel(2, 1, 0xFF445566)
+    let path = "/tmp/silly_gfx_test.ppm"
+    if img.save_ppm(path):
+        match gfx.load_image(path):
+            case Some(m): print(f"loaded {m.width()}x{m.height()}", h(m.pixel(0, 0)), h(m.pixel(2, 1)))
+            case None: print("load failed")
+
+    let z = gfx.canvas(2, 2)
+    z.clear(gfx.rgb(0, 0, 255))
+    z.resize(5, 4)
+    print("resize", z.width(), z.height(), h(z.pixel(1, 1)), h(z.pixel(4, 3)))
+    z.clear(0)
+    z.clip(2, 2, 10, 10)
+    z.fill_rect(0, 0, 5, 4, gfx.rgb(0, 255, 0))
+    print("clip", h(z.pixel(1, 1)), h(z.pixel(3, 3)))
+
+    var evs: list[str] = []
+    for i in 0..5:
+        win.present()
+        for e in win.events():
+            evs.push(f"{e}")
+    print("events", evs)
+    win.close()

@@ -1,0 +1,302 @@
+# Operating-system services: environment, working directory, files and directories.
+#
+#     import os
+#     fn main():
+#         print(os.getcwd())
+#         for name in os.listdir(".").unwrap():
+#             if os.is_dir(name):
+#                 print(name + "/")
+#         os.makedirs("out/logs").unwrap()
+#
+# Calls that can fail return Result[T, str] with the system's error message.
+
+extern "os.c"
+
+extern fn os_error() -> str
+extern fn os_errno_code() -> int
+extern fn os_has_env(k: str) -> bool
+extern fn os_getenv(k: str) -> str
+extern fn os_setenv(k: str, v: str) -> bool
+extern fn os_unsetenv(k: str) -> bool
+extern fn os_environ() -> str
+extern fn os_getpid() -> int
+extern fn os_getppid() -> int
+extern fn os_getuid() -> int
+extern fn os_getcwd() -> str
+extern fn os_chdir(p: str) -> bool
+extern fn os_system(cmd: str) -> int
+extern fn os_hostname() -> str
+extern fn os_uname(field: int) -> str
+extern fn os_listdir(p: str) -> str
+extern fn os_listed() -> bool
+extern fn os_mkdir(p: str) -> bool
+extern fn os_rmdir(p: str) -> bool
+extern fn os_remove(p: str) -> bool
+extern fn os_rename(a: str, b: str) -> bool
+extern fn os_symlink(target: str, p: str) -> bool
+extern fn os_chmod(p: str, mode: int) -> bool
+extern fn os_kind(p: str, follow: bool) -> int
+extern fn os_stat(p: str, field: int) -> int
+extern fn os_realpath(p: str) -> str
+extern fn os_readlink(p: str) -> str
+extern fn os_append_file(p: str, data: str) -> bool
+extern fn os_tmpdir() -> str
+extern fn os_mkdtemp(prefix: str) -> str
+
+# The path separator, and the separator of lists of paths such as PATH.
+const SEP: str = "/"
+const PATHSEP: str = ":"
+const LINESEP: str = "\n"
+
+fn _check(ok: bool) -> Result[bool, str]:
+    if ok:
+        return Ok(true)
+    return Err(os_error())
+
+# Splits the NUL-terminated items the native layer returns lists as.
+fn _items(raw: str) -> list[str]:
+    var out = raw.split("\0")
+    out.pop()
+    return out
+
+# ---- environment ----
+
+# The value of an environment variable, or None if it isn't set.
+fn getenv(key: str) -> Option[str]:
+    if os_has_env(key):
+        return Some(os_getenv(key))
+    return None
+
+# The value of an environment variable, or `default` if it isn't set.
+fn getenv_or(key: str, default: str) -> str:
+    if os_has_env(key):
+        return os_getenv(key)
+    return default
+
+# Sets an environment variable for this process and its children.
+fn setenv(key: str, value: str) -> Result[bool, str]:
+    return _check(os_setenv(key, value))
+
+# Removes an environment variable.
+fn unsetenv(key: str) -> Result[bool, str]:
+    return _check(os_unsetenv(key))
+
+# Every environment variable, in the order the system keeps them.
+fn environ() -> map[str, str]:
+    var out: map[str, str] = {}
+    for kv in _items(os_environ()):
+        match kv.find("="):
+            case Some(i):
+                out[kv[0:i]] = kv[i + 1:len(kv)]
+            case None:
+                pass
+    return out
+
+# ---- process ----
+
+# This process's id.
+fn getpid() -> int:
+    return os_getpid()
+
+# The parent process's id.
+fn getppid() -> int:
+    return os_getppid()
+
+# The user id this process runs as.
+fn getuid() -> int:
+    return os_getuid()
+
+# The current working directory.
+fn getcwd() -> str:
+    return os_getcwd()
+
+# Changes the current working directory.
+fn chdir(path: str) -> Result[bool, str]:
+    return _check(os_chdir(path))
+
+# Runs a shell command, letting it use this program's terminal; returns its exit status.
+fn system(cmd: str) -> int:
+    return os_system(cmd)
+
+# This machine's host name.
+fn hostname() -> str:
+    return os_hostname()
+
+# The operating system's name, such as "Linux".
+fn sysname() -> str:
+    return os_uname(0)
+
+# The kernel release, such as "6.9.1".
+fn release() -> str:
+    return os_uname(1)
+
+# The CPU architecture, such as "x86_64".
+fn machine() -> str:
+    return os_uname(2)
+
+# ---- files and directories ----
+
+# The names in a directory (not "." or ".."), sorted.
+fn listdir(path: str) -> Result[list[str], str]:
+    let raw = os_listdir(path)
+    if not os_listed():
+        return Err(os_error())
+    var out = _items(raw)
+    out.sort()
+    return Ok(out)
+
+# Creates one directory (see makedirs for parents too).
+fn mkdir(path: str) -> Result[bool, str]:
+    return _check(os_mkdir(path))
+
+# Creates a directory and any missing parents; an existing directory is fine.
+fn makedirs(path: str) -> Result[bool, str]:
+    if is_dir(path):
+        return Ok(true)
+    var at = 0
+    if path.starts_with("/"):
+        at = 1
+    while true:
+        let rest = path[at:len(path)]
+        var end = len(path)
+        var last = true
+        match rest.find("/"):
+            case Some(j):
+                end = at + j
+                last = false
+            case None:
+                pass
+        let part = path[0:end]
+        if part != "" and not is_dir(part):
+            if not os_mkdir(part) and not is_dir(part):
+                return Err(os_error())
+        if last:
+            break
+        at = end + 1
+    return Ok(true)
+
+# Removes a file (or a symbolic link).
+fn remove(path: str) -> Result[bool, str]:
+    return _check(os_remove(path))
+
+# Removes an empty directory.
+fn rmdir(path: str) -> Result[bool, str]:
+    return _check(os_rmdir(path))
+
+# Removes a file, or a directory and everything in it.
+fn remove_all(path: str) -> Result[bool, str]:
+    if os_kind(path, false) == 2:
+        for name in listdir(path)?:
+            remove_all(path + "/" + name)?
+        return rmdir(path)
+    return remove(path)
+
+# Moves src to dst, replacing dst if it exists.
+fn rename(src: str, dst: str) -> Result[bool, str]:
+    return _check(os_rename(src, dst))
+
+# Creates a symbolic link at path pointing to target.
+fn symlink(target: str, path: str) -> Result[bool, str]:
+    return _check(os_symlink(target, path))
+
+# Where the symbolic link at path points.
+fn readlink(path: str) -> Result[str, str]:
+    let s = os_readlink(path)
+    if s == "":
+        return Err(os_error())
+    return Ok(s)
+
+# Sets permission bits, such as 0o755.
+fn chmod(path: str, mode: int) -> Result[bool, str]:
+    return _check(os_chmod(path, mode))
+
+# Whether path exists (following links).
+fn exists(path: str) -> bool:
+    return os_kind(path, true) != 0
+
+# Whether path is a regular file.
+fn is_file(path: str) -> bool:
+    return os_kind(path, true) == 1
+
+# Whether path is a directory.
+fn is_dir(path: str) -> bool:
+    return os_kind(path, true) == 2
+
+# Whether path is a symbolic link (not following it).
+fn is_link(path: str) -> bool:
+    return os_kind(path, false) == 4
+
+# The size of the file at path in bytes.
+fn file_size(path: str) -> Result[int, str]:
+    let n = os_stat(path, 0)
+    if n < 0:
+        return Err(os_error())
+    return Ok(n)
+
+# Last modification time as a Unix timestamp in seconds.
+fn mtime(path: str) -> Result[f64, str]:
+    let n = os_stat(path, 1)
+    if n < 0:
+        return Err(os_error())
+    return Ok((n as f64) / 1000000000.0)
+
+# Permission bits of a file.
+fn mode(path: str) -> Result[int, str]:
+    let n = os_stat(path, 2)
+    if n < 0:
+        return Err(os_error())
+    return Ok(n)
+
+# The absolute path with every symbolic link resolved; the file must exist.
+fn realpath(path: str) -> Result[str, str]:
+    let s = os_realpath(path)
+    if s == "":
+        return Err(os_error())
+    return Ok(s)
+
+# The whole contents of the file at path.
+fn read(path: str) -> Result[str, str]:
+    return read_file(path)
+
+# Replaces the file at path with data, creating it if needed.
+fn write(path: str, data: str) -> Result[bool, str]:
+    if write_file(path, data):
+        return Ok(true)
+    return Err(f"cannot write {path}")
+
+# Adds data to the end of the file at path, creating it if needed.
+fn append(path: str, data: str) -> Result[bool, str]:
+    return _check(os_append_file(path, data))
+
+# Copies a file's contents.
+fn copy(src: str, dst: str) -> Result[bool, str]:
+    let data = read_file(src)?
+    return write(dst, data)
+
+# Every file under a directory, as paths starting with `root`, in sorted order.
+fn walk(root: str) -> Result[list[str], str]:
+    var out: list[str] = []
+    _walk(root, &mut out)?
+    return Ok(out)
+
+fn _walk(dir: str, out: &mut list[str]) -> Result[bool, str]:
+    for name in listdir(dir)?:
+        var p = dir + "/" + name
+        if dir.ends_with("/"):
+            p = dir + name
+        if os_kind(p, false) == 2:
+            _walk(p, &mut out)?
+        else:
+            out.push(p)
+    return Ok(true)
+
+# The directory for temporary files ($TMPDIR or /tmp).
+fn tmpdir() -> str:
+    return os_tmpdir()
+
+# Creates a new, empty, uniquely named directory under tmpdir().
+fn mkdtemp(prefix: str) -> Result[str, str]:
+    let s = os_mkdtemp(prefix)
+    if s == "":
+        return Err(os_error())
+    return Ok(s)

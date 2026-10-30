@@ -1,0 +1,96 @@
+struct Vec2:
+    x: int
+    y: int
+
+    fn add(self, o: Vec2) -> Vec2:
+        return Vec2(self.x + o.x, self.y + o.y)
+
+    fn grow(mut self, k: int):
+        self.x *= k
+        self.y *= k
+
+struct Team:
+    name: str
+    members: list[str]
+    best: Option[int]
+
+fn enlist(t: &mut Team, who: str):
+    t.members.push(who)
+
+fn total(xs: &list[int]) -> int:
+    var s = 0
+    for x in xs:
+        s += x
+    return s
+
+fn bump(xs: &mut list[int]):
+    for i in 0..len(xs):
+        xs[i] += 100
+
+fn apply(f: fn(int) -> int, v: int) -> int:
+    return f(v)
+
+fn sq(x: int) -> int:
+    return x * x
+
+fn neg(x: int) -> int:
+    return -x
+
+fn pick[T](a: T, b: T, first: bool) -> T:
+    return a if first else b
+
+struct Pair[A, B]:
+    a: A
+    b: B
+
+    fn swapped(self) -> Pair[B, A]:
+        return Pair(self.b, self.a)
+
+fn main():
+    var v = Vec2(1, 2).add(Vec2(10, 20))
+    v.grow(2)
+    print(v, v.x, v == Vec2(22, 44), v != Vec2(0, 0))
+    var t = Team("owls", [], None)
+    enlist(&mut t, "ann")
+    enlist(&mut t, "bob")
+    t.best = Some(3)
+    print(t)
+    var xs = [1, 2, 3]
+    bump(&mut xs)
+    print(xs, total(&xs))
+    let fs = [sq, neg]
+    for f in fs:
+        print(apply(f, 7))
+    print(pick("a", "b", false), pick(1.5, 2.5, true))
+    let p = Pair(1, "one")
+    print(p.swapped(), p.swapped().a)
+    var grid: [[int; 3]; 2] = [[0; 3]; 2]
+    grid[1][2] = 5
+    grid[0][0] += 1
+    print(grid, len(grid))
+    var nested: list[list[int]] = []
+    for i in 0..3:
+        var row: list[int] = []
+        for j in 0..i + 1:
+            row.push(i * j)
+        nested.push(row)
+    nested[2].push(99)
+    print(nested)
+    let copy = nested.clone()
+    nested[0][0] = -1
+    print(copy[0], nested[0])
+    var a = 1
+    var b = 2
+    swap(&mut a, &mut b)
+    print(a, b)
+#> Vec2(x=22, y=44) 22 true true
+#> Team(name="owls", members=["ann", "bob"], best=Some(3))
+#> [101, 102, 103] 306
+#> 49
+#> -7
+#> b 1.5
+#> Pair(a="one", b=1) one
+#> [[1, 0, 0], [0, 0, 5]] 2
+#> [[0], [0, 1], [0, 2, 4, 99]]
+#> [0] [-1]
+#> 2 1

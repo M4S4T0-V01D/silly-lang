@@ -1,0 +1,29 @@
+# Short-lived lists: build the Collatz path of every start value below N, then
+# summarise it. One list per iteration, reclaimed when the iteration ends.
+
+fn path(start: int) -> list[int]:
+    var out: list[int] = []
+    var x = start
+    while x != 1:
+        out.push(x)
+        x = x // 2 if x % 2 == 0 else 3 * x + 1
+    out.push(1)
+    return out
+
+fn main():
+    let a = args()
+    let n = a[1].parse_int().unwrap() if len(a) > 1 else 100000
+    var longest = 0
+    var arg = 0
+    var peak_sum = 0
+    for i in 1..n:
+        let p = path(i)
+        var peak = 0
+        for v in p:
+            if v > peak:
+                peak = v
+        peak_sum += peak
+        if len(p) > longest:
+            longest = len(p)
+            arg = i
+    print(arg, longest, peak_sum)

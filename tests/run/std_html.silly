@@ -1,0 +1,17 @@
+# html: escape, unescape, strip_tags
+
+import html
+fn main():
+    print(html.escape(&"<a href=\"x\" title='y'>Tom & Jerry</a>"))
+    print(html.escape_text(&"<a href=\"x\">&</a>"))
+    for s in ["&lt;p&gt; caf&eacute; &#169; &#x1F600; &amp;amp;", "a & b &unknown; &#; &#xZZ; &#0; &#x110000; &#55296;", "&copy&copy; tail &", "&Omega;&ne;&sum; &quot;&#39;&apos;&nbsp;|"]:
+        print(html.unescape(&s))
+    print(html.strip_tags(&"<p class=\"x\">Hi <b>there</b><!-- c -->&amp; bye</p> 1 < 2"))
+
+#> &lt;a href=&quot;x&quot; title=&#x27;y&#x27;&gt;Tom &amp; Jerry&lt;/a&gt;
+#> &lt;a href="x"&gt;&amp;&lt;/a&gt;
+#> <p> café © 😀 &amp;
+#> a & b &unknown; &#; &#xZZ; � � �
+#> &copy© tail &
+#> Ω≠∑ "'' |
+#> Hi there& bye 1 < 2

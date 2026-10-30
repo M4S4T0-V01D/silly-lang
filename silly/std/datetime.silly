@@ -1,0 +1,626 @@
+# Calendar dates, times of day and durations, like Python's datetime (naive
+# values: no time zones). For timestamps and the clock in local time, see time.
+#
+#     import datetime as dt
+#     fn main():
+#         let d = dt.date(2024, 2, 28)
+#         print(d.add_days(2).isoformat(), d.weekday_name())   # 2024-03-01 Wednesday
+#         let a = dt.datetime(2024, 3, 1, 9, 30, 0)
+#         let b = a.add(dt.hours(36))
+#         print(b.isoformat(), b.sub(a).str())                 # 2024-03-02T21:30:00 1 day, 12:00:00
+#         print(b.strftime("%a %d %b %Y, %I:%M %p"))           # Sat 02 Mar 2024, 09:30 PM
+#         print(dt.parse_datetime("2024-03-01 12:00").unwrap().isoformat())
+#
+# Years run from 1 to 9999 on the proleptic Gregorian calendar. Building an
+# invalid date panics; the parse_ functions return Err instead.
+
+import time
+
+const MIN_YEAR: int = 1
+const MAX_YEAR: int = 9999
+
+const _US_SEC: int = 1000000
+const _US_DAY: int = 86400000000
+
+fn _fdiv(a: int, b: int) -> int:
+    var q = a / b
+    if q * b > a:
+        q -= 1
+    return q
+
+fn _fmod(a: int, b: int) -> int:
+    return a - _fdiv(a, b) * b
+
+fn _cmp(a: int, b: int) -> int:
+    return -1 if a < b else (1 if a > b else 0)
+
+fn _z(n: int, w: int) -> str:
+    var s = str(n.abs())
+    while len(s) < w:
+        s = "0" + s
+    return ("-" + s) if n < 0 else s
+
+# Whether year has a February 29th.
+fn is_leap(year: int) -> bool:
+    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0
+
+# 28 to 31.
+fn days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        return 29 if is_leap(year) else 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+# 365 or 366.
+fn days_in_year(year: int) -> int:
+    return 366 if is_leap(year) else 365
+
+fn _days_before_year(y: int) -> int:
+    let p = y - 1
+    return p * 365 + p / 4 - p / 100 + p / 400
+
+fn _days_before_month(y: int, m: int) -> int:
+    var n = 0
+    for i in 1..m:
+        n += days_in_month(y, i)
+    return n
+
+# Monday to Sunday.
+fn weekday_names() -> list[str]:
+    return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+# January to December.
+fn month_names() -> list[str]:
+    return ["January", "February", "March", "April", "May", "June", "July", "August",
+            "September", "October", "November", "December"]
+
+# ---- durations ----
+
+# A length of time, kept in microseconds. It may be negative.
+struct Duration:
+    us: int
+
+    # The whole days, rounded down like Python's timedelta.days.
+    fn days(self) -> int:
+        return _fdiv(self.us, _US_DAY)
+
+    # Seconds after the whole days (0 to 86399).
+    fn seconds(self) -> int:
+        return _fmod(self.us, _US_DAY) / _US_SEC
+
+    # Microseconds after the whole seconds (0 to 999999).
+    fn microseconds(self) -> int:
+        return _fmod(self.us, _US_SEC)
+
+    fn total_seconds(self) -> f64:
+        return self.us as f64 / 1000000.0
+
+    fn total_microseconds(self) -> int:
+        return self.us
+
+    fn add(self, o: Duration) -> Duration:
+        return Duration(self.us + o.us)
+
+    fn sub(self, o: Duration) -> Duration:
+        return Duration(self.us - o.us)
+
+    fn neg(self) -> Duration:
+        return Duration(-self.us)
+
+    fn abs(self) -> Duration:
+        return Duration(self.us.abs())
+
+    fn mul(self, n: int) -> Duration:
+        return Duration(self.us * n)
+
+    # Divided by n, rounded down to the microsecond.
+    fn div(self, n: int) -> Duration:
+        return Duration(_fdiv(self.us, n))
+
+    # How many times o fits in this one, rounded down.
+    fn ratio(self, o: Duration) -> int:
+        return _fdiv(self.us, o.us)
+
+    fn compare(self, o: Duration) -> int:
+        return _cmp(self.us, o.us)
+
+    fn is_zero(self) -> bool:
+        return self.us == 0
+
+    # Like Python's str(timedelta): "-1 day, 23:59:59", "2 days, 1:00:00.500000".
+    fn str(self) -> str:
+        let d = self.days()
+        let s = self.seconds()
+        var out = ""
+        if d != 0:
+            out = str(d) + (" day, " if d.abs() == 1 else " days, ")
+        out += str(s / 3600) + ":" + _z(s / 60 % 60, 2) + ":" + _z(s % 60, 2)
+        if self.microseconds() != 0:
+            out += "." + _z(self.microseconds(), 6)
+        return out
+
+# A Duration of days, seconds and microseconds (any of them may be negative).
+fn timedelta(days: int, seconds: int, microseconds: int) -> Duration:
+    return Duration(days * _US_DAY + seconds * _US_SEC + microseconds)
+
+# A Duration of n weeks.
+fn weeks(n: int) -> Duration:
+    return Duration(n * 7 * _US_DAY)
+
+# A Duration of n days.
+fn days(n: int) -> Duration:
+    return Duration(n * _US_DAY)
+
+# A Duration of n hours.
+fn hours(n: int) -> Duration:
+    return Duration(n * 3600 * _US_SEC)
+
+# A Duration of n minutes.
+fn minutes(n: int) -> Duration:
+    return Duration(n * 60 * _US_SEC)
+
+# A Duration of n seconds.
+fn seconds(n: int) -> Duration:
+    return Duration(n * _US_SEC)
+
+# A Duration of n milliseconds.
+fn milliseconds(n: int) -> Duration:
+    return Duration(n * 1000)
+
+# A Duration of n microseconds.
+fn microseconds(n: int) -> Duration:
+    return Duration(n)
+
+# ---- dates ----
+
+# A calendar day (proleptic Gregorian, years 1 to 9999).
+struct Date:
+    year: int
+    month: int
+    day: int
+
+    # Days since 0001-01-01, which is day 1.
+    fn ordinal(self) -> int:
+        return _days_before_year(self.year) + _days_before_month(self.year, self.month) + self.day
+
+    # 0 = Monday ... 6 = Sunday.
+    fn weekday(self) -> int:
+        return (self.ordinal() + 6) % 7
+
+    # 1 = Monday ... 7 = Sunday.
+    fn isoweekday(self) -> int:
+        return self.weekday() + 1
+
+    # The day of the year, from 1.
+    fn yearday(self) -> int:
+        return _days_before_month(self.year, self.month) + self.day
+
+    fn weekday_name(self) -> str:
+        return weekday_names()[self.weekday()]
+
+    fn month_name(self) -> str:
+        return month_names()[self.month - 1]
+
+    # (ISO year, ISO week 1-53, ISO weekday 1-7).
+    fn isocalendar(self) -> (int, int, int):
+        var y = self.year
+        var start = _iso_week1(y)
+        let o = self.ordinal()
+        if o < start:
+            y -= 1
+            start = _iso_week1(y)
+        elif y < MAX_YEAR and o >= _iso_week1(y + 1):
+            y += 1
+            start = _iso_week1(y)
+        return (y, (o - start) / 7 + 1, self.isoweekday())
+
+    # "2024-03-01"
+    fn isoformat(self) -> str:
+        return _z(self.year, 4) + "-" + _z(self.month, 2) + "-" + _z(self.day, 2)
+
+    fn strftime(self, fmt: &str) -> str:
+        return _strftime(fmt, self, &Time(0, 0, 0, 0))
+
+    # "Fri Mar  1 00:00:00 2024"
+    fn ctime(self) -> str:
+        return _strftime(&"%c", self, &Time(0, 0, 0, 0))
+
+    fn add_days(self, n: int) -> Date:
+        return from_ordinal(self.ordinal() + n)
+
+    fn add(self, d: Duration) -> Date:
+        return self.add_days(d.days())
+
+    # Moves by calendar months, clamping the day (Jan 31 + 1 month = Feb 29 in 2024).
+    fn add_months(self, n: int) -> Date:
+        let m0 = self.year * 12 + self.month - 1 + n
+        let y = _fdiv(m0, 12)
+        let m = _fmod(m0, 12) + 1
+        return date(y, m, min(self.day, days_in_month(y, m)))
+
+    fn add_years(self, n: int) -> Date:
+        return self.add_months(n * 12)
+
+    # The time from o to this date.
+    fn sub(self, o: Date) -> Duration:
+        return days(self.ordinal() - o.ordinal())
+
+    fn days_since(self, o: Date) -> int:
+        return self.ordinal() - o.ordinal()
+
+    fn replace(self, year: int, month: int, day: int) -> Date:
+        return date(year, month, day)
+
+    fn with_day(self, day: int) -> Date:
+        return date(self.year, self.month, day)
+
+    fn first_of_month(self) -> Date:
+        return Date(self.year, self.month, 1)
+
+    fn last_of_month(self) -> Date:
+        return Date(self.year, self.month, days_in_month(self.year, self.month))
+
+    fn compare(self, o: Date) -> int:
+        return _cmp(self.ordinal(), o.ordinal())
+
+    fn before(self, o: Date) -> bool:
+        return self.ordinal() < o.ordinal()
+
+    fn after(self, o: Date) -> bool:
+        return self.ordinal() > o.ordinal()
+
+    fn at(self, t: Time) -> DateTime:
+        return combine(self.clone(), t)
+
+fn _iso_week1(y: int) -> int:
+    # The ordinal of the Monday of ISO week 1: the week holding January 4th.
+    let jan4 = _days_before_year(y) + 4
+    return jan4 - (jan4 + 6) % 7
+
+fn _check_date(y: int, m: int, d: int) -> Result[bool, str]:
+    if y < MIN_YEAR or y > MAX_YEAR:
+        return Err("year " + str(y) + " is out of range")
+    if m < 1 or m > 12:
+        return Err("month must be in 1..12")
+    if d < 1 or d > days_in_month(y, m):
+        return Err("day is out of range for month")
+    return Ok(true)
+
+# The Date year-month-day; panics if there is no such day.
+fn date(year: int, month: int, day: int) -> Date:
+    match _check_date(year, month, day):
+        case Err(e): panic("datetime.date: " + e)
+        case Ok(_): pass
+    return Date(year, month, day)
+
+# The date for an ordinal (1 = 0001-01-01).
+fn from_ordinal(n: int) -> Date:
+    if n < 1 or n > 3652059:
+        panic("datetime.from_ordinal: " + str(n) + " is out of range")
+    # 146097 days in 400 years; then centuries, 4-year cycles and years.
+    var d = n - 1
+    let n400 = d / 146097
+    d %= 146097
+    var n100 = d / 36524
+    d %= 36524
+    let n4 = d / 1461
+    d %= 1461
+    var n1 = d / 365
+    d %= 365
+    var y = n400 * 400 + n100 * 100 + n4 * 4 + n1 + 1
+    if n1 == 4 or n100 == 4:
+        return Date(y - 1, 12, 31)
+    var m = 1
+    while d >= days_in_month(y, m):
+        d -= days_in_month(y, m)
+        m += 1
+    return Date(y, m, d + 1)
+
+# The date for an ISO year, week and weekday (1 = Monday).
+fn from_isocalendar(year: int, week: int, weekday: int) -> Date:
+    if week < 1 or week > 53 or weekday < 1 or weekday > 7:
+        panic("datetime.from_isocalendar: week or weekday out of range")
+    return from_ordinal(_iso_week1(year) + (week - 1) * 7 + weekday - 1)
+
+# Today's date in local time.
+fn today() -> Date:
+    let n = time.now()
+    return Date(n.year, n.month, n.day)
+
+# ---- times of day ----
+
+# A time of day, to the microsecond.
+struct Time:
+    hour: int
+    minute: int
+    second: int
+    microsecond: int
+
+    fn _us(self) -> int:
+        return ((self.hour * 60 + self.minute) * 60 + self.second) * _US_SEC + self.microsecond
+
+    # "09:30:00", or "09:30:00.250000" with microseconds.
+    fn isoformat(self) -> str:
+        var s = _z(self.hour, 2) + ":" + _z(self.minute, 2) + ":" + _z(self.second, 2)
+        if self.microsecond != 0:
+            s += "." + _z(self.microsecond, 6)
+        return s
+
+    fn strftime(self, fmt: &str) -> str:
+        return _strftime(fmt, &Date(1900, 1, 1), self)
+
+    fn compare(self, o: Time) -> int:
+        return _cmp(self._us(), o._us())
+
+    fn before(self, o: Time) -> bool:
+        return self._us() < o._us()
+
+# hour:minute:second.
+fn time_of_day(hour: int, minute: int, second: int) -> Time:
+    return time_us(hour, minute, second, 0)
+
+# hour:minute:second.microsecond.
+fn time_us(hour: int, minute: int, second: int, microsecond: int) -> Time:
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 59 or microsecond < 0 or microsecond > 999999:
+        panic("datetime.time: value out of range")
+    return Time(hour, minute, second, microsecond)
+
+# ---- date and time ----
+
+# A Date and a Time together (naive: no time zone).
+struct DateTime:
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    microsecond: int
+
+    fn date(self) -> Date:
+        return Date(self.year, self.month, self.day)
+
+    fn time(self) -> Time:
+        return Time(self.hour, self.minute, self.second, self.microsecond)
+
+    # Microseconds since 0001-01-01T00:00.
+    fn _us(self) -> int:
+        return (self.date().ordinal() - 1) * _US_DAY + self.time()._us()
+
+    fn weekday(self) -> int:
+        return self.date().weekday()
+
+    fn isoweekday(self) -> int:
+        return self.date().isoweekday()
+
+    fn weekday_name(self) -> str:
+        return self.date().weekday_name()
+
+    fn month_name(self) -> str:
+        return self.date().month_name()
+
+    fn yearday(self) -> int:
+        return self.date().yearday()
+
+    fn isocalendar(self) -> (int, int, int):
+        return self.date().isocalendar()
+
+    # "2024-03-01T09:30:00", with sep between date and time ("T" or " ").
+    fn isoformat(self) -> str:
+        return self.isoformat_sep("T")
+
+    fn isoformat_sep(self, sep: str) -> str:
+        return self.date().isoformat() + sep + self.time().isoformat()
+
+    fn strftime(self, fmt: &str) -> str:
+        return _strftime(fmt, &self.date(), &self.time())
+
+    fn ctime(self) -> str:
+        return self.strftime(&"%c")
+
+    fn add(self, d: Duration) -> DateTime:
+        return _from_us(self._us() + d.us)
+
+    # The time from o to this one.
+    fn sub(self, o: DateTime) -> Duration:
+        return Duration(self._us() - o._us())
+
+    fn add_days(self, n: int) -> DateTime:
+        return self.add(days(n))
+
+    fn add_months(self, n: int) -> DateTime:
+        return combine(self.date().add_months(n), self.time())
+
+    fn add_years(self, n: int) -> DateTime:
+        return self.add_months(n * 12)
+
+    fn compare(self, o: DateTime) -> int:
+        return _cmp(self._us(), o._us())
+
+    fn before(self, o: DateTime) -> bool:
+        return self._us() < o._us()
+
+    fn after(self, o: DateTime) -> bool:
+        return self._us() > o._us()
+
+    # Seconds since 1970-01-01T00:00, reading this as UTC.
+    fn timestamp_utc(self) -> f64:
+        return self.sub(datetime(1970, 1, 1, 0, 0, 0)).total_seconds()
+
+    # Rounded down to a multiple of d (e.g. hours(1) starts the hour).
+    fn floor(self, d: Duration) -> DateTime:
+        let u = self._us()
+        return _from_us(u - _fmod(u, d.us))
+
+fn _from_us(u: int) -> DateTime:
+    let d = from_ordinal(_fdiv(u, _US_DAY) + 1)
+    let r = _fmod(u, _US_DAY)
+    let s = r / _US_SEC
+    return DateTime(d.year, d.month, d.day, s / 3600, s / 60 % 60, s % 60, r % _US_SEC)
+
+# The DateTime year-month-day hour:minute:second.
+fn datetime(year: int, month: int, day: int, hour: int, minute: int, second: int) -> DateTime:
+    return datetime_us(year, month, day, hour, minute, second, 0)
+
+# Like datetime, with microseconds.
+fn datetime_us(year: int, month: int, day: int, hour: int, minute: int, second: int, microsecond: int) -> DateTime:
+    let d = date(year, month, day)
+    let t = time_us(hour, minute, second, microsecond)
+    return combine(d, t)
+
+# The DateTime of day d at time t.
+fn combine(d: Date, t: Time) -> DateTime:
+    return DateTime(d.year, d.month, d.day, t.hour, t.minute, t.second, t.microsecond)
+
+# The local date and time now.
+fn now() -> DateTime:
+    let ns = time.time_ns()
+    let n = time.from_timestamp(_fdiv(ns, 1000000000))
+    return DateTime(n.year, n.month, n.day, n.hour, n.minute, n.second, _fmod(ns, 1000000000) / 1000)
+
+# The date and time now in UTC.
+fn utcnow() -> DateTime:
+    return utc_from_timestamp(time.time())
+
+# The UTC date and time of a Unix timestamp.
+fn utc_from_timestamp(t: f64) -> DateTime:
+    let us = (t * 1000000.0).round() as int
+    return datetime(1970, 1, 1, 0, 0, 0).add(microseconds(us))
+
+# ---- parsing ----
+
+fn _num(s: &str, at: int, n: int) -> Result[int, str]:
+    if at + n > len(s):
+        return Err("too short")
+    let part = s[at:at + n]
+    for c in part.chars():
+        if not c.is_digit():
+            return Err("expected digits at position " + str(at))
+    return Ok(part.parse_int().unwrap())
+
+# "YYYY-MM-DD" or "YYYYMMDD".
+fn parse_date(s: &str) -> Result[Date, str]:
+    let t = s.trim()
+    var parts: list[int] = []
+    let compact = len(t) == 8
+    if not compact and (len(t) != 10 or t[4:5] != "-" or t[7:8] != "-"):
+        return Err("invalid isoformat date: '" + t + "'")
+    for (at, n) in ([(0, 4), (4, 2), (6, 2)] if compact else [(0, 4), (5, 2), (8, 2)]):
+        match _num(&t, at, n):
+            case Ok(v): parts.push(v)
+            case Err(_): return Err("invalid isoformat date: '" + t + "'")
+    match _check_date(parts[0], parts[1], parts[2]):
+        case Err(e): return Err(e)
+        case Ok(_): pass
+    return Ok(Date(parts[0], parts[1], parts[2]))
+
+# "HH", "HH:MM", "HH:MM:SS" or "HH:MM:SS.ffffff" (1 to 6 fraction digits), or
+# the same without colons ("HHMMSS").
+fn parse_time(s: &str) -> Result[Time, str]:
+    let t = s.trim()
+    let bad = "invalid isoformat time: '" + t + "'"
+    let colons = len(t) > 2 and t[2:3] == ":"
+    var f = [0, 0, 0]
+    var at = 0
+    for i in 0..3:
+        if at >= len(t) or t[at:at + 1] == "." or t[at:at + 1] == ",":
+            if i == 0:
+                return Err(bad)
+            break
+        if i > 0 and colons:
+            if t[at:at + 1] != ":":
+                return Err(bad)
+            at += 1
+        match _num(&t, at, 2):
+            case Ok(v): f[i] = v
+            case Err(_): return Err(bad)
+        at += 2
+    var us = 0
+    if at < len(t):
+        if (t[at:at + 1] != "." and t[at:at + 1] != ",") or len(t) - at - 1 < 1 or len(t) - at - 1 > 6:
+            return Err(bad)
+        let digits = t[at + 1:]
+        match _num(&digits, 0, len(digits)):
+            case Ok(v): us = v
+            case Err(_): return Err(bad)
+        for _ in len(digits)..6:
+            us *= 10
+    if f[0] > 23 or f[1] > 59 or f[2] > 59:
+        return Err("time value out of range: '" + t + "'")
+    return Ok(Time(f[0], f[1], f[2], us))
+
+# A date, optionally followed by "T" or " " and a time.
+fn parse_datetime(s: &str) -> Result[DateTime, str]:
+    let t = s.trim()
+    let n = 8 if len(t) == 8 or (len(t) > 8 and t[8:9] == "T") else 10
+    var d = Date(1, 1, 1)
+    match parse_date(&t[:min(n, len(t))]):
+        case Ok(x): d = x
+        case Err(e): return Err(e)
+    if len(t) <= n:
+        return Ok(combine(d, Time(0, 0, 0, 0)))
+    if t[n:n + 1] != "T" and t[n:n + 1] != " ":
+        return Err("invalid isoformat string: '" + t + "'")
+    match parse_time(&t[n + 1:]):
+        case Ok(x): return Ok(combine(d, x))
+        case Err(e): return Err(e)
+
+# ---- formatting ----
+
+# strftime with the C locale's names. Codes: %a %A %w %u %d %e %b %B %m %y %Y %H
+# %I %p %M %S %f %j %U %W %V %G %c %x %X %D %F %T %R %n %t %%; %z and %Z are
+# empty (these values carry no zone). Unknown codes are copied as they are.
+fn _strftime(fmt: &str, d: &Date, t: &Time) -> str:
+    let cs = fmt.chars()
+    var out = ""
+    var i = 0
+    while i < len(cs):
+        let c = cs[i]
+        i += 1
+        if c != '%' or i >= len(cs):
+            out += str(c)
+            continue
+        let k = cs[i]
+        i += 1
+        let wd = d.weekday()
+        let yd = d.yearday()
+        match k:
+            case 'a': out += weekday_names()[wd][:3]
+            case 'A': out += weekday_names()[wd]
+            case 'w': out += str((wd + 1) % 7)
+            case 'u': out += str(wd + 1)
+            case 'd': out += _z(d.day, 2)
+            case 'e': out += (" " if d.day < 10 else "") + str(d.day)
+            case 'b': out += month_names()[d.month - 1][:3]
+            case 'h': out += month_names()[d.month - 1][:3]
+            case 'B': out += month_names()[d.month - 1]
+            case 'm': out += _z(d.month, 2)
+            case 'y': out += _z(d.year % 100, 2)
+            case 'Y': out += _z(d.year, 4)
+            case 'C': out += _z(d.year / 100, 2)
+            case 'H': out += _z(t.hour, 2)
+            case 'I': out += _z((t.hour + 11) % 12 + 1, 2)
+            case 'p': out += "AM" if t.hour < 12 else "PM"
+            case 'M': out += _z(t.minute, 2)
+            case 'S': out += _z(t.second, 2)
+            case 'f': out += _z(t.microsecond, 6)
+            case 'j': out += _z(yd, 3)
+            case 'U': out += _z((yd - 1 + 7 - (wd + 1) % 7) / 7, 2)
+            case 'W': out += _z((yd - 1 + 7 - wd) / 7, 2)
+            case 'V': out += _z(d.isocalendar().1, 2)
+            case 'G': out += _z(d.isocalendar().0, 4)
+            case 'c': out += _strftime(&"%a %b %e %H:%M:%S %Y", d, t)
+            case 'x': out += _strftime(&"%m/%d/%y", d, t)
+            case 'D': out += _strftime(&"%m/%d/%y", d, t)
+            case 'X': out += _strftime(&"%H:%M:%S", d, t)
+            case 'T': out += _strftime(&"%H:%M:%S", d, t)
+            case 'F': out += _strftime(&"%Y-%m-%d", d, t)
+            case 'R': out += _strftime(&"%H:%M", d, t)
+            case 'n': out += "\n"
+            case 't': out += "\t"
+            case '%': out += "%"
+            case 'z': pass
+            case 'Z': pass
+            case _: out += "%" + str(k)
+    return out

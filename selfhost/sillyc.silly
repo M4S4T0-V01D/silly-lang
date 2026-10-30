@@ -1,0 +1,2656 @@
+# sillyc: the self-hosted compiler for Silly Core, written in Silly Core.
+#
+#     sillyc input.silly output.c
+#
+# Silly Core is Silly without generics, closures, traits, threads, floats,
+# tuples, maps, modules and f-strings.  It keeps the memory model: every
+# string and list lives on the data stack, nothing is ever malloc'd, and a
+# function whose result holds no data-stack storage releases what it used when
+# it returns.  The generated C includes sillyc_rt.h.
+#
+# The compiler is single-pass over each function body: the parser type-checks
+# every expression as it reads it and returns its C code, so there is no AST.
+# A first pass over the tokens collects structs, enums, constants and function
+# signatures so bodies can use names declared later in the file.
+#
+# Types are strings: "int", "str", "list[Tok]", "Option[int]", "Result[str, str]".
+
+const K_NAME = 1
+const K_INT = 2
+const K_STR = 3
+const K_CHAR = 4
+const K_OP = 5
+const K_NL = 6
+const K_INDENT = 7
+const K_DEDENT = 8
+const K_EOF = 9
+
+const BY_VALUE = 0
+const BY_REF = 1
+const BY_MUT = 2
+
+struct Tok:
+    kind: int
+    text: str       # K_STR: the decoded string; K_CHAR: the code point in decimal
+    line: int
+    col: int
+
+struct Field:
+    name: str
+    ty: str
+
+struct StructDef:
+    name: str
+    fields: list[Field]
+
+struct Variant:
+    name: str
+    tys: list[str]
+
+struct EnumDef:
+    name: str
+    variants: list[Variant]
+
+struct Param:
+    name: str
+    ty: str
+    mode: int
+
+struct FnDef:
+    name: str
+    params: list[Param]
+    ret: str
+    body: int       # index of the token after the signature's ':'
+
+struct ConstDef:
+    name: str
+    ty: str
+    code: str
+
+struct Var:
+    name: str
+    cname: str
+    ty: str
+    mutable: bool
+    is_ref: bool
+
+struct Val:
+    code: str
+    ty: str
+    place: bool     # an lvalue in the generated C
+    mutable: bool   # a place that may be assigned or borrowed as &mut
+
+struct C:
+    file: str
+    lines: list[str]    # the source, for assertion messages
+    toks: list[Tok]
+    pos: int
+    structs: list[StructDef]
+    enums: list[EnumDef]
+    fns: list[FnDef]
+    consts: list[ConstDef]
+    vars: list[Var]
+    scopes: list[int]
+    cnames: list[str]   # C names of the current function's locals
+    kws: list[str]
+    breaks: list[bool]  # per enclosing loop: has a `break` been seen
+    done: list[str]     # types and helpers already emitted
+    fwd: list[str]
+    defs: list[str]
+    helpers: list[str]
+    out: list[str]
+    tmp: int
+    fx: int             # counts generated calls and mutations, for evaluation order
+    diverged: bool      # set by exit() and panic()
+    ret: str
+    reset: bool
+    loops: int
+    indent: str
+
+# ---- errors ----
+
+fn fatal(file: str, line: int, col: int, msg: str):
+    eprint(file + ":" + str(line) + ":" + str(col) + ": error: " + msg)
+    exit(1)
+
+fn die(c: &C, msg: str):
+    let t = c.toks[c.pos]
+    fatal(c.file, t.line, t.col, msg)
+
+fn fail(c: &C, msg: str) -> Val:
+    die(&c, msg)
+    return Val("", "", false, false)
+
+# ---- lexer ----
+
+fn is_digit(b: u8) -> bool:
+    return b >= '0' and b <= '9'
+
+fn is_ident_start(b: u8) -> bool:
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or b == '_'
+
+fn is_ident(b: u8) -> bool:
+    return is_ident_start(b) or is_digit(b)
+
+fn hex_val(b: u8) -> int:
+    if is_digit(b):
+        return (b as int) - 48
+    if b >= 'a' and b <= 'f':
+        return (b as int) - 87
+    if b >= 'A' and b <= 'F':
+        return (b as int) - 55
+    return -1
+
+fn escape_code(b: u8) -> int:
+    # The code point of the escape `\b`, or -1.
+    if b == 'n':
+        return 10
+    if b == 't':
+        return 9
+    if b == 'r':
+        return 13
+    if b == '0':
+        return 0
+    if b == '\\' or b == '"' or b == '\'' or b == '{' or b == '}':
+        return b as int
+    return -1
+
+fn escape_len(src: &str, j: int) -> int:
+    # How many bytes the escape starting with the backslash at src[j] spans, or -1.
+    let n = len(src)
+    if j + 1 >= n:
+        return -1
+    let c = src[j + 1]
+    if escape_code(c) >= 0:
+        return 2
+    if c == 'x':
+        if j + 3 < n and hex_val(src[j + 2]) >= 0 and hex_val(src[j + 3]) >= 0:
+            return 4
+        return -1
+    if c == 'u' and j + 2 < n and src[j + 2] == '{':
+        var k = j + 3
+        while k < n and hex_val(src[k]) >= 0:
+            k += 1
+        if k == j + 3 or k - j - 3 > 6 or k >= n or src[k] != '}':
+            return -1
+        return k - j + 1
+    return -1
+
+fn escape_value(src: &str, j: int, k: int) -> int:
+    # The code point of the escape src[j:j + k] that escape_len accepted.
+    if k == 2:
+        return escape_code(src[j + 1])
+    var start = j + 2
+    var stop = j + k
+    if src[j + 1] == 'u':
+        start = j + 3
+        stop = j + k - 1
+    var code = 0
+    for m in start..stop:
+        code = code * 16 + hex_val(src[m])
+    return code
+
+fn utf8_len(b: u8) -> int:
+    if b < 128:
+        return 1
+    if b >= 240:
+        return 4
+    if b >= 224:
+        return 3
+    return 2
+
+const OPS3 = "//= ..= **= <<= >>="
+const OPS2 = "-> == != <= >= // += -= *= /= %= &= |= ^= .. << >> **"
+const OPS1 = "+-*/%<>=()[]{},:.&|^~@?"
+
+fn lex(file: str, src: str) -> list[Tok]:
+    var toks: list[Tok] = []
+    var indents: list[int] = [0]
+    let ops3 = OPS3.split(" ")
+    let ops2 = OPS2.split(" ")
+    let n = len(src)
+    var i = 0
+    var line = 1
+    var line_start = 0
+    var depth = 0
+    var at_start = true
+    while i < n:
+        if at_start and depth == 0:
+            var j = i
+            while j < n and src[j] == ' ':
+                j += 1
+            if j < n and src[j] == '\t':
+                fatal(file, line, j - line_start + 1, "indent with spaces, not tabs")
+            if j >= n:
+                i = j
+                break
+            if src[j] == '\n' or src[j] == '\r' or src[j] == '#':
+                while j < n and src[j] != '\n':
+                    j += 1
+                i = j + 1
+                line += 1
+                line_start = i
+                continue
+            let width = j - i
+            if width > indents[-1]:
+                indents.push(width)
+                toks.push(Tok(K_INDENT, "", line, width + 1))
+            else:
+                while width < indents[-1]:
+                    indents.pop()
+                    toks.push(Tok(K_DEDENT, "", line, width + 1))
+                if width != indents[-1]:
+                    fatal(file, line, width + 1, "this line's indentation matches no enclosing block")
+            at_start = false
+            i = j
+            continue
+        let b = src[i]
+        let col = i - line_start + 1
+        if b == '\n':
+            if depth == 0:
+                toks.push(Tok(K_NL, "", line, col))
+                at_start = true
+            i += 1
+            line += 1
+            line_start = i
+        elif b == ' ' or b == '\r' or b == '\t':
+            i += 1
+        elif b == '#':
+            while i < n and src[i] != '\n':
+                i += 1
+        elif is_ident_start(b):
+            var j = i
+            while j < n and is_ident(src[j]):
+                j += 1
+            toks.push(Tok(K_NAME, src[i:j], line, col))
+            i = j
+        elif is_digit(b):
+            var j = i
+            var digits = ""
+            if b == '0' and i + 1 < n and (src[i + 1] == 'x' or src[i + 1] == 'X'):
+                j = i + 2
+                digits = "0x"
+                while j < n and (hex_val(src[j]) >= 0 or src[j] == '_'):
+                    if src[j] != '_':
+                        digits += src[j:j + 1]
+                    j += 1
+            elif b == '0' and i + 1 < n and (src[i + 1] == 'o' or src[i + 1] == 'O' or src[i + 1] == 'b' or src[i + 1] == 'B'):
+                # C has 0b, and a leading 0 for octal.
+                let octal = src[i + 1] == 'o' or src[i + 1] == 'O'
+                j = i + 2
+                digits = "0" if octal else "0b"
+                while j < n and ((src[j] == '0' or src[j] == '1' or (octal and src[j] >= '2' and src[j] <= '7')) or src[j] == '_'):
+                    if src[j] != '_':
+                        digits += src[j:j + 1]
+                    j += 1
+            else:
+                while j < n and (is_digit(src[j]) or src[j] == '_'):
+                    if src[j] != '_':
+                        digits += src[j:j + 1]
+                    j += 1
+            if j < n and (src[j] == '.' and j + 1 < n and is_digit(src[j + 1])):
+                fatal(file, line, col, "floats are not part of Silly Core")
+            if j < n and is_ident(src[j]):
+                fatal(file, line, col, "invalid number literal")
+            toks.push(Tok(K_INT, digits, line, col))
+            i = j
+        elif b == '"':
+            var j = i + 1
+            var seg = j
+            var s = ""
+            while j < n and src[j] != '"':
+                if src[j] == '\n':
+                    fatal(file, line, col, "unterminated string")
+                if src[j] == '\\':
+                    let k = escape_len(&src, j)
+                    if k < 0:
+                        fatal(file, line, j - line_start + 1, "unknown escape sequence")
+                    s += src[seg:j] + str(escape_value(&src, j, k) as char)
+                    j += k
+                    seg = j
+                else:
+                    j += 1
+            if j >= n:
+                fatal(file, line, col, "unterminated string")
+            s += src[seg:j]
+            toks.push(Tok(K_STR, s, line, col))
+            i = j + 1
+        elif b == '\'':
+            var j = i + 1
+            var code = 0
+            if j < n and src[j] == '\\':
+                let k = escape_len(&src, j)
+                if k < 0:
+                    fatal(file, line, col, "unknown escape sequence")
+                code = escape_value(&src, j, k)
+                j += k
+            elif j < n:
+                let k = utf8_len(src[j])
+                if k == 1:
+                    code = src[j] as int
+                else:
+                    code = (src[j] as int) & (127 >> k)
+                    for m in 1..k:
+                        code = code * 64 + ((src[j + m] as int) & 63)
+                j += k
+            if j >= n or src[j] != '\'':
+                fatal(file, line, col, "a char literal holds exactly one character")
+            toks.push(Tok(K_CHAR, str(code), line, col))
+            i = j + 1
+        else:
+            var op = ""
+            if i + 3 <= n and ops3.contains(src[i:i + 3]):
+                op = src[i:i + 3]
+            elif i + 2 <= n and ops2.contains(src[i:i + 2]):
+                op = src[i:i + 2]
+            elif OPS1.contains(src[i:i + 1]):
+                op = src[i:i + 1]
+            else:
+                fatal(file, line, col, "unexpected character")
+            if op == "(" or op == "[" or op == "{":
+                depth += 1
+            elif op == ")" or op == "]" or op == "}":
+                depth -= 1
+            toks.push(Tok(K_OP, op, line, col))
+            i += len(op)
+    if len(toks) > 0 and toks[-1].kind != K_NL and toks[-1].kind != K_DEDENT:
+        toks.push(Tok(K_NL, "", line, 1))
+    while len(indents) > 1:
+        indents.pop()
+        toks.push(Tok(K_DEDENT, "", line, 1))
+    toks.push(Tok(K_EOF, "", line, 1))
+    return toks
+
+# ---- types ----
+
+fn is_scalar(t: str) -> bool:
+    return t == "int" or t == "bool" or t == "u8" or t == "char"
+
+fn is_list(t: str) -> bool:
+    return t.starts_with("list[")
+
+fn inner(t: str) -> str:
+    # list[T] / Option[T] -> T
+    return t[t.find("[").unwrap() + 1:len(t) - 1]
+
+fn type_args(t: str) -> list[str]:
+    # Result[A, B] -> [A, B], splitting only at the top bracket level.
+    var out: list[str] = []
+    let s = inner(t)
+    var depth = 0
+    var start = 0
+    for i in 0..len(s):
+        if s[i] == '[':
+            depth += 1
+        elif s[i] == ']':
+            depth -= 1
+        elif s[i] == ',' and depth == 0:
+            out.push(s[start:i])
+            start = i + 2
+    out.push(s[start:len(s)])
+    return out
+
+fn mangle(t: str) -> str:
+    return t.replace("[", "_L").replace("]", "_R").replace(", ", "_C")
+
+fn ctype(t: str) -> str:
+    if t == "int":
+        return "i64"
+    if t == "bool":
+        return "bool"
+    if t == "u8":
+        return "uint8_t"
+    if t == "char":
+        return "uint32_t"
+    if t == "str":
+        return "sl_str"
+    if t == "void":
+        return "void"
+    return "T_" + mangle(t)
+
+fn find_struct(c: &C, name: str) -> int:
+    for i in 0..len(c.structs):
+        if c.structs[i].name == name:
+            return i
+    return -1
+
+fn find_enum(c: &C, name: str) -> int:
+    for i in 0..len(c.enums):
+        if c.enums[i].name == name:
+            return i
+    return -1
+
+fn find_fn(c: &C, name: str) -> int:
+    for i in 0..len(c.fns):
+        if c.fns[i].name == name:
+            return i
+    return -1
+
+fn find_const(c: &C, name: str) -> int:
+    for i in 0..len(c.consts):
+        if c.consts[i].name == name:
+            return i
+    return -1
+
+fn find_var(c: &C, name: str) -> int:
+    var i = len(c.vars) - 1
+    while i >= 0:
+        if c.vars[i].name == name:
+            return i
+        i -= 1
+    return -1
+
+fn holds_storage(c: &C, t: str) -> bool:
+    # Does a value of type t point into the data stack?
+    if is_scalar(t) or t == "void":
+        return false
+    if t == "str" or is_list(t):
+        return true
+    let s = find_struct(&c, t)
+    if s >= 0:
+        for f in c.structs[s].fields:
+            if f.ty == t or holds_storage(&c, f.ty):
+                return true
+        return false
+    for v in variants_of(&c, t):
+        for vt in v.tys:
+            if vt == t or holds_storage(&c, vt):
+                return true
+    return false
+
+fn is_copy(c: &C, t: str) -> bool:
+    # Copy types: scalars, str, and structs and enums made only of them.
+    if is_scalar(t) or t == "str":
+        return true
+    if is_list(t):
+        return false
+    let s = find_struct(&c, t)
+    if s >= 0:
+        for f in c.structs[s].fields:
+            if f.ty == t or not is_copy(&c, f.ty):
+                return false
+        return true
+    if is_enum(&c, t):
+        for v in variants_of(&c, t):
+            for vt in v.tys:
+                if vt == t or not is_copy(&c, vt):
+                    return false
+        return true
+    return false
+
+fn is_enum(c: &C, t: str) -> bool:
+    return t.starts_with("Option[") or t.starts_with("Result[") or find_enum(&c, t) >= 0
+
+fn variants_of(c: &C, t: str) -> list[Variant]:
+    var out: list[Variant] = []
+    if t.starts_with("Option["):
+        out.push(Variant("None", []))
+        out.push(Variant("Some", [inner(t)]))
+    elif t.starts_with("Result["):
+        let a = type_args(t)
+        out.push(Variant("Ok", [a[0]]))
+        out.push(Variant("Err", [a[1]]))
+    else:
+        let e = find_enum(&c, t)
+        if e >= 0:
+            out = c.enums[e].variants.clone()
+    return out
+
+# ---- tokens ----
+
+const KEYWORDS = "fn let var if elif else while for in loop break continue return pass match case struct enum const and or not as true false import from trait impl extern self mut is"
+
+fn tok(c: &C) -> Tok:
+    return c.toks[c.pos]
+
+fn at_op(c: &C, s: str) -> bool:
+    let t = c.toks[c.pos]
+    return t.kind == K_OP and t.text == s
+
+fn at_kw(c: &C, s: str) -> bool:
+    let t = c.toks[c.pos]
+    return t.kind == K_NAME and t.text == s
+
+fn at_kind(c: &C, k: int) -> bool:
+    return c.toks[c.pos].kind == k
+
+fn eat_op(c: &mut C, s: str) -> bool:
+    if at_op(&c, s):
+        c.pos += 1
+        return true
+    return false
+
+fn eat_kw(c: &mut C, s: str) -> bool:
+    if at_kw(&c, s):
+        c.pos += 1
+        return true
+    return false
+
+fn describe(t: Tok) -> str:
+    if t.kind == K_NL:
+        return "end of line"
+    if t.kind == K_INDENT:
+        return "an indented block"
+    if t.kind == K_DEDENT:
+        return "end of block"
+    if t.kind == K_EOF:
+        return "end of file"
+    if t.kind == K_STR:
+        return "a string"
+    if t.kind == K_CHAR:
+        return "a char"
+    return "'" + t.text + "'"
+
+fn expect_op(c: &mut C, s: str):
+    if not eat_op(&mut c, s):
+        die(&c, "expected '" + s + "', found " + describe(tok(&c)))
+
+fn expect_kw(c: &mut C, s: str):
+    if not eat_kw(&mut c, s):
+        die(&c, "expected '" + s + "', found " + describe(tok(&c)))
+
+fn expect_name(c: &mut C) -> str:
+    let t = tok(&c)
+    if t.kind != K_NAME or c.kws.contains(t.text):
+        die(&c, "expected a name, found " + describe(t))
+    c.pos += 1
+    return t.text
+
+fn expect_nl(c: &mut C):
+    if at_kind(&c, K_NL):
+        c.pos += 1
+    elif not at_kind(&c, K_DEDENT) and not at_kind(&c, K_EOF):
+        die(&c, "expected end of line, found " + describe(tok(&c)))
+
+fn skip_block(c: &mut C):
+    # Skip the rest of this line and, if an indented block follows, the block.
+    while not at_kind(&c, K_NL) and not at_kind(&c, K_EOF):
+        c.pos += 1
+    if at_kind(&c, K_NL):
+        c.pos += 1
+    if at_kind(&c, K_INDENT):
+        var depth = 0
+        loop:
+            let k = tok(&c).kind
+            c.pos += 1
+            if k == K_INDENT:
+                depth += 1
+            elif k == K_DEDENT:
+                depth -= 1
+                if depth == 0:
+                    break
+
+# ---- C text ----
+
+fn c_quote(s: str) -> str:
+    # A C string literal with the bytes of s.
+    var out = "\""
+    for i in 0..len(s):
+        let b = s[i]
+        if b >= ' ' and b <= '~' and b != '"' and b != '\\' and b != '?':
+            out += s[i:i + 1]
+        else:
+            let v = b as int
+            out += "\\" + str((v >> 6) & 7) + str((v >> 3) & 7) + str(v & 7)
+    return out + "\""
+
+fn c_lit(s: str) -> str:
+    return "sl_lit(" + c_quote(s) + ", " + str(len(s)) + ")"
+
+fn where_at(c: &C, t: Tok) -> str:
+    return c_quote(c.file + ":" + str(t.line) + ":" + str(t.col))
+
+fn here(c: &C) -> str:
+    return where_at(&c, tok(&c))
+
+fn emit(c: &mut C, line: str):
+    c.out.push(c.indent + line)
+
+fn tmp_c(c: &mut C, ct: str) -> str:
+    # A fresh C temporary of C type ct, declared (uninitialised) before the current statement.
+    let name = "_t" + str(c.tmp)
+    c.tmp += 1
+    emit(&mut c, ct + " " + name + ";")
+    return name
+
+fn new_tmp(c: &mut C, ty: str) -> str:
+    emit_type(&mut c, ty)
+    return tmp_c(&mut c, ctype(ty))
+
+fn fresh(c: &mut C, base: str) -> str:
+    let name = "_" + base + str(c.tmp)
+    c.tmp += 1
+    return name
+
+# ---- types in source ----
+
+fn parse_type(c: &mut C) -> str:
+    if at_kw(&c, "fn"):
+        die(&c, "function types and closures are not part of Silly Core")
+    if at_op(&c, "&"):
+        die(&c, "a reference type is only allowed on a parameter")
+    if at_op(&c, "("):
+        die(&c, "tuples are not part of Silly Core")
+    let name = expect_name(&mut c)
+    if name == "list" or name == "Option":
+        expect_op(&mut c, "[")
+        let t = parse_type(&mut c)
+        expect_op(&mut c, "]")
+        return name + "[" + t + "]"
+    if name == "Result":
+        expect_op(&mut c, "[")
+        let a = parse_type(&mut c)
+        expect_op(&mut c, ",")
+        let b = parse_type(&mut c)
+        expect_op(&mut c, "]")
+        return "Result[" + a + ", " + b + "]"
+    if is_scalar(name) or name == "str" or find_struct(&c, name) >= 0 or find_enum(&c, name) >= 0:
+        if at_op(&c, "["):
+            die(&c, "generics are not part of Silly Core")
+        return name
+    if name == "map" or name == "f64" or name == "f32" or name == "Task":
+        c.pos -= 1
+        die(&c, "type '" + name + "' is not part of Silly Core")
+    c.pos -= 1
+    die(&c, "unknown type '" + name + "'")
+    return ""
+
+# ---- pass 1: declarations ----
+
+fn declare_names(c: &mut C):
+    c.pos = 0
+    while not at_kind(&c, K_EOF):
+        if at_kw(&c, "struct") or at_kw(&c, "enum"):
+            let is_struct = at_kw(&c, "struct")
+            c.pos += 1
+            let name = expect_name(&mut c)
+            if find_struct(&c, name) >= 0 or find_enum(&c, name) >= 0 or is_scalar(name) or name == "str":
+                c.pos -= 1
+                die(&c, "type '" + name + "' is already defined")
+            if is_struct:
+                c.structs.push(StructDef(name, []))
+            else:
+                c.enums.push(EnumDef(name, []))
+        skip_block(&mut c)
+
+fn parse_struct(c: &mut C):
+    let name = expect_name(&mut c)
+    if at_op(&c, "["):
+        die(&c, "generics are not part of Silly Core")
+    expect_op(&mut c, ":")
+    expect_nl(&mut c)
+    if not at_kind(&c, K_INDENT):
+        die(&c, "expected the struct's fields on indented lines")
+    c.pos += 1
+    var fields: list[Field] = []
+    while not at_kind(&c, K_DEDENT):
+        if eat_kw(&mut c, "pass"):
+            expect_nl(&mut c)
+            continue
+        if at_kw(&c, "fn"):
+            die(&c, "methods are not part of Silly Core")
+        let f = expect_name(&mut c)
+        for g in fields:
+            if g.name == f:
+                c.pos -= 1
+                die(&c, "duplicate field '" + f + "'")
+        expect_op(&mut c, ":")
+        fields.push(Field(f, parse_type(&mut c)))
+        expect_nl(&mut c)
+    c.pos += 1
+    c.structs[find_struct(&c, name)].fields = fields
+
+fn parse_enum(c: &mut C):
+    let name = expect_name(&mut c)
+    if at_op(&c, "["):
+        die(&c, "generics are not part of Silly Core")
+    expect_op(&mut c, ":")
+    expect_nl(&mut c)
+    if not at_kind(&c, K_INDENT):
+        die(&c, "expected the enum's variants on indented lines")
+    c.pos += 1
+    var vs: list[Variant] = []
+    while not at_kind(&c, K_DEDENT):
+        let v = expect_name(&mut c)
+        for w in vs:
+            if w.name == v:
+                c.pos -= 1
+                die(&c, "duplicate variant '" + v + "'")
+        var tys: list[str] = []
+        if eat_op(&mut c, "("):
+            loop:
+                if c.toks[c.pos + 1].kind == K_OP and c.toks[c.pos + 1].text == ":":
+                    c.pos += 2     # a named payload field: the name is documentation
+                tys.push(parse_type(&mut c))
+                if not eat_op(&mut c, ","):
+                    break
+            expect_op(&mut c, ")")
+        vs.push(Variant(v, tys))
+        expect_nl(&mut c)
+    c.pos += 1
+    if len(vs) == 0:
+        die(&c, "an enum needs at least one variant")
+    c.enums[find_enum(&c, name)].variants = vs
+
+fn parse_fn_sig(c: &mut C):
+    let start = c.pos
+    let name = expect_name(&mut c)
+    if find_fn(&c, name) >= 0:
+        c.pos -= 1
+        die(&c, "function '" + name + "' is already defined")
+    if at_op(&c, "["):
+        die(&c, "generics are not part of Silly Core")
+    expect_op(&mut c, "(")
+    var ps: list[Param] = []
+    while not at_op(&c, ")"):
+        let p = expect_name(&mut c)
+        for q in ps:
+            if q.name == p:
+                c.pos -= 1
+                die(&c, "duplicate parameter '" + p + "'")
+        expect_op(&mut c, ":")
+        var mode = BY_VALUE
+        if eat_op(&mut c, "&"):
+            mode = BY_REF
+            if eat_kw(&mut c, "mut"):
+                mode = BY_MUT
+        ps.push(Param(p, parse_type(&mut c), mode))
+        if not eat_op(&mut c, ","):
+            break
+    expect_op(&mut c, ")")
+    var ret = "void"
+    if eat_op(&mut c, "->"):
+        ret = parse_type(&mut c)
+    expect_op(&mut c, ":")
+    if name == "main" and (len(ps) > 0 or (ret != "void" and ret != "int")):
+        c.pos = start
+        die(&c, "main takes no parameters and returns nothing or an int")
+    c.fns.push(FnDef(name, ps, ret, c.pos))
+    skip_block(&mut c)
+
+fn parse_const(c: &mut C):
+    let name = expect_name(&mut c)
+    if find_const(&c, name) >= 0:
+        c.pos -= 1
+        die(&c, "constant '" + name + "' is already defined")
+    var want = ""
+    if eat_op(&mut c, ":"):
+        want = parse_type(&mut c)
+    expect_op(&mut c, "=")
+    let t = tok(&c)
+    var ty = ""
+    var code = ""
+    if t.kind == K_INT:
+        ty = "int"
+        code = "((i64)" + t.text + ")"
+    elif t.kind == K_OP and t.text == "-" and c.toks[c.pos + 1].kind == K_INT:
+        c.pos += 1
+        ty = "int"
+        code = "((i64)-" + c.toks[c.pos].text + ")"
+    elif t.kind == K_STR:
+        ty = "str"
+        code = c_lit(t.text)
+    elif t.kind == K_CHAR:
+        ty = "char"
+        code = "((uint32_t)" + t.text + ")"
+    elif t.kind == K_NAME and (t.text == "true" or t.text == "false"):
+        ty = "bool"
+        code = t.text
+    else:
+        die(&c, "a constant in Silly Core must be a literal")
+    if want == "u8" and ty == "int":
+        ty = "u8"
+        code = "((uint8_t)" + code + ")"
+    if want != "" and want != ty:
+        die(&c, "constant '" + name + "' is declared " + want + " but its value is " + ty)
+    c.pos += 1
+    expect_nl(&mut c)
+    c.consts.push(ConstDef(name, ty, code))
+
+fn declare(c: &mut C):
+    declare_names(&mut c)
+    c.pos = 0
+    while not at_kind(&c, K_EOF):
+        if at_kind(&c, K_NL):
+            c.pos += 1
+        elif eat_kw(&mut c, "fn"):
+            parse_fn_sig(&mut c)
+        elif eat_kw(&mut c, "struct"):
+            parse_struct(&mut c)
+        elif eat_kw(&mut c, "enum"):
+            parse_enum(&mut c)
+        elif eat_kw(&mut c, "const"):
+            parse_const(&mut c)
+        elif at_kw(&c, "import") or at_kw(&c, "from"):
+            die(&c, "modules are not part of Silly Core")
+        elif at_op(&c, "@"):
+            die(&c, "decorators are not part of Silly Core")
+        elif at_kw(&c, "trait") or at_kw(&c, "impl") or at_kw(&c, "extern"):
+            die(&c, "'" + tok(&c).text + "' is not part of Silly Core")
+        else:
+            die(&c, "expected fn, struct, enum or const, found " + describe(tok(&c)))
+    if find_fn(&c, "main") < 0:
+        fatal(c.file, 1, 1, "no main function")
+
+# ---- C types and helpers ----
+
+fn emit_type(c: &mut C, t: str):
+    if is_scalar(t) or t == "str" or t == "void" or c.done.contains(t):
+        return
+    c.done.push(t)
+    let ct = ctype(t)
+    let m = mangle(t)
+    if is_list(t):
+        c.fwd.push("typedef sl_list " + ct + ";")
+        let el = inner(t)
+        emit_type(&mut c, el)
+        let ce = ctype(el)
+        c.helpers.push("static inline void push_" + m + "(" + ct + " *l, " + ce + " x) { if (l->len == l->cap) sl_grow(l, sizeof(" + ce + ")); ((" + ce + " *)l->ptr)[l->len++] = x; }")
+        c.helpers.push("static inline " + ce + " *at_" + m + "(" + ct + " *l, i64 i, const char *w) { return &((" + ce + " *)l->ptr)[sl_index(i, l->len, w)]; }")
+        c.helpers.push("static inline " + ce + " pop_" + m + "(" + ct + " *l, const char *w) { if (!l->len) sl_panic(w, \"pop() from an empty list\"); return ((" + ce + " *)l->ptr)[--l->len]; }")
+        return
+    c.fwd.push("typedef struct " + ct + " " + ct + ";")
+    let s = find_struct(&c, t)
+    if s >= 0:
+        let fields = c.structs[s].fields.clone()
+        for f in fields:
+            emit_type(&mut c, f.ty)
+        var d = "struct " + ct + " {"
+        for f in fields:
+            d += " " + ctype(f.ty) + " m_" + f.name + ";"
+        if len(fields) == 0:
+            d += " char _;"
+        c.defs.push(d + " };")
+        return
+    let vs = variants_of(&c, t)
+    for v in vs:
+        for vt in v.tys:
+            emit_type(&mut c, vt)
+    var d = "struct " + ct + " { i64 tag; union { char _;"
+    for v in vs:
+        if len(v.tys) > 0:
+            d += " struct {"
+            for k in 0..len(v.tys):
+                d += " " + ctype(v.tys[k]) + " a" + str(k) + ";"
+            d += " } " + v.name + ";"
+    c.defs.push(d + " } u; };")
+    for k in 0..len(vs):
+        let v = vs[k].clone()
+        var ps: list[str] = []
+        var sets = ""
+        for j in 0..len(v.tys):
+            ps.push(ctype(v.tys[j]) + " a" + str(j))
+            sets += " r.u." + v.name + ".a" + str(j) + " = a" + str(j) + ";"
+        if len(ps) == 0:
+            ps.push("void")
+        c.helpers.push("static inline " + ct + " mk_" + m + "_" + v.name + "(" + ", ".join(ps) + ") { " + ct + " r; r.tag = " + str(k) + ";" + sets + " return r; }")
+
+fn clone_code(c: &mut C, t: str, x: str) -> str:
+    # C code for a deep copy of x, of type t.
+    if is_copy(&c, t):
+        return x
+    emit_type(&mut c, t)
+    let ct = ctype(t)
+    let name = "clone_" + mangle(t)
+    if not c.done.contains(name):
+        c.done.push(name)
+        c.fwd.push("static " + ct + " " + name + "(" + ct + " x);")
+        var body = ""
+        if is_list(t):
+            let el = inner(t)
+            let ce = ctype(el)
+            body = ct + " r = {0}; for (i64 i = 0; i < x.len; i++) push_" + mangle(t) + "(&r, " + clone_code(&mut c, el, "((" + ce + " *)x.ptr)[i]") + "); return r;"
+        elif find_struct(&c, t) >= 0:
+            body = ct + " r = x;"
+            let fields = c.structs[find_struct(&c, t)].fields.clone()
+            for f in fields:
+                if not is_copy(&c, f.ty):
+                    body += " r.m_" + f.name + " = " + clone_code(&mut c, f.ty, "x.m_" + f.name) + ";"
+            body += " return r;"
+        else:
+            body = ct + " r = x; switch (x.tag) {"
+            let vs = variants_of(&c, t)
+            for k in 0..len(vs):
+                let v = vs[k].clone()
+                body += " case " + str(k) + ":"
+                for j in 0..len(v.tys):
+                    if not is_copy(&c, v.tys[j]):
+                        let f = "u." + v.name + ".a" + str(j)
+                        body += " r." + f + " = " + clone_code(&mut c, v.tys[j], "x." + f) + ";"
+                body += " break;"
+            body += " } return r;"
+        c.helpers.push("static " + ct + " " + name + "(" + ct + " x) { " + body + " }")
+    return name + "(" + x + ")"
+
+fn proto(c: &mut C, i: int) -> str:
+    let f = c.fns[i].clone()
+    emit_type(&mut c, f.ret)
+    var ps: list[str] = []
+    for p in f.params:
+        emit_type(&mut c, p.ty)
+        if p.mode == BY_VALUE:
+            ps.push(ctype(p.ty) + " v_" + p.name)
+        else:
+            ps.push(ctype(p.ty) + " *v_" + p.name)
+    if len(ps) == 0:
+        ps.push("void")
+    return "static " + ctype(f.ret) + " f_" + f.name + "(" + ", ".join(ps) + ")"
+
+# ---- scopes ----
+
+fn push_scope(c: &mut C):
+    c.scopes.push(len(c.vars))
+
+fn pop_scope(c: &mut C):
+    let n = c.scopes.pop()
+    c.vars.truncate(n)
+
+fn add_var(c: &mut C, name: str, ty: str, mutable: bool, is_ref: bool) -> str:
+    # Declares a local and returns its C name; shadowed names get a numbered C name.
+    var cn = "v_" + name
+    if c.cnames.contains(cn):
+        cn = cn + "__" + str(c.tmp)
+        c.tmp += 1
+    c.cnames.push(cn)
+    var code = cn
+    if is_ref:
+        code = "(*" + cn + ")"
+    c.vars.push(Var(name, code, ty, mutable, is_ref))
+    return cn
+
+# ---- values and evaluation order ----
+
+fn rv(code: str, ty: str) -> Val:
+    return Val(code, ty, false, false)
+
+fn pin(c: &mut C, pre: &mut list[str], v: Val) -> str:
+    # Evaluates v now, into a temporary, and returns the temporary.
+    let t = new_tmp(&mut c, v.ty)
+    pre.push(t + " = " + v.code)
+    return t
+
+fn seq(pre: &list[str], last: str) -> str:
+    # A C comma expression: the pinned values in order, then last.
+    if len(pre) == 0:
+        return last
+    var s = "("
+    for p in pre:
+        s += p + ", "
+    return s + last + ")"
+
+fn commas(xs: &list[str]) -> str:
+    var s = ""
+    for i in 0..len(xs):
+        if i > 0:
+            s += ", "
+        s += xs[i]
+    return s
+
+fn int_value(text: str) -> int:
+    var n = 0
+    if text.starts_with("0x"):
+        for i in 2..len(text):
+            n = n * 16 + hex_val(text[i])
+        return n
+    for i in 0..len(text):
+        n = n * 10 + hex_val(text[i])
+    return n
+
+fn err_at(c: &C, t: Tok, msg: str):
+    fatal(c.file, t.line, t.col, msg)
+
+fn expect_ty(c: &C, t: Tok, v: Val, want: str):
+    if want != "" and v.ty != want:
+        err_at(&c, t, "expected " + want + ", found " + v.ty)
+
+fn typed(c: &mut C, want: str) -> Val:
+    # An expression that must have type want.
+    let t = tok(&c)
+    let v = expr(&mut c, want)
+    expect_ty(&c, t, v, want)
+    return v
+
+fn next_is_op(c: &C, s: str) -> bool:
+    let t = c.toks[c.pos + 1]
+    return t.kind == K_OP and t.text == s
+
+# ---- calls ----
+
+fn call_args(c: &mut C, pre: &mut list[str], tys: &list[str], modes: &list[int], names: &list[str], what: str) -> list[str]:
+    # Compiles `(a, b, ...)` against parameter types and passing modes.  When any argument
+    # has an effect, every argument but the last is pinned so they run left to right.
+    let open = tok(&c)
+    expect_op(&mut c, "(")
+    var codes: list[str] = []
+    var cts: list[str] = []
+    var pres: list[list[str]] = []
+    var any = false
+    var n = 0
+    while not at_op(&c, ")"):
+        if at_kind(&c, K_NAME) and next_is_op(&c, "="):
+            die(&c, "keyword arguments are not part of Silly Core")
+        let start = tok(&c)
+        var p: list[str] = []
+        let f0 = c.fx
+        if n >= len(tys):
+            err_at(&c, start, what + " takes " + str(len(tys)) + " argument(s) but " + str(n + 1) + " were given")
+        let ty = tys[n]
+        if ty == "*":
+            # a str or char argument of a str method
+            let v = expr(&mut c, "")
+            if v.ty == "char":
+                codes.push("sl_char_str(" + v.code + ")")
+            elif v.ty == "str":
+                codes.push(v.code)
+            else:
+                err_at(&c, start, "expected str or char, found " + v.ty)
+            cts.push("sl_str")
+        elif modes[n] == BY_VALUE:
+            let v = expr(&mut c, ty)
+            expect_ty(&c, start, v, ty)
+            codes.push(v.code)
+            cts.push(ctype(ty))
+        else:
+            var m = false
+            let amp = eat_op(&mut c, "&")
+            if amp:
+                m = eat_kw(&mut c, "mut")
+            if modes[n] == BY_MUT and not m:
+                err_at(&c, start, "parameter '" + names[n] + "' is `&mut`; pass `&mut ...`")
+            var v = rv("", "")
+            if amp:
+                v = postfix(&mut c, ty)
+            else:
+                v = expr(&mut c, ty)
+            expect_ty(&c, start, v, ty)
+            if m and not v.mutable:
+                err_at(&c, start, "cannot borrow this value as `&mut`")
+            if v.place:
+                codes.push("&" + v.code)
+            else:
+                codes.push("&" + pin(&mut c, &mut p, v))
+            cts.push(ctype(ty) + " *")
+        if c.fx != f0:
+            any = true
+        pres.push(p)
+        n += 1
+        if not eat_op(&mut c, ","):
+            break
+    if n < len(tys):
+        var missing: list[str] = []
+        for k in n..len(tys):
+            missing.push(names[k])
+        err_at(&c, open, what + " is missing argument(s): " + commas(&missing))
+    expect_op(&mut c, ")")
+    for k in 0..n:
+        for s in pres[k]:
+            pre.push(s)
+        if any and n >= 2 and k < n - 1:
+            let t = tmp_c(&mut c, cts[k])
+            pre.push(t + " = " + codes[k])
+            codes[k] = t
+    return codes
+
+fn value_args(c: &mut C, pre: &mut list[str], tys: &list[str], what: str) -> list[str]:
+    var modes: list[int] = []
+    var names: list[str] = []
+    for k in 0..len(tys):
+        modes.push(BY_VALUE)
+        names.push("#" + str(k))
+    return call_args(&mut c, &mut pre, &tys, &modes, &names, what)
+
+fn call_fn(c: &mut C, i: int) -> Val:
+    let f = c.fns[i].clone()
+    var tys: list[str] = []
+    var modes: list[int] = []
+    var names: list[str] = []
+    for p in f.params:
+        tys.push(p.ty)
+        modes.push(p.mode)
+        names.push(p.name)
+    var pre: list[str] = []
+    let args = call_args(&mut c, &mut pre, &tys, &modes, &names, "'" + f.name + "'")
+    c.fx += 1
+    return rv(seq(&pre, "f_" + f.name + "(" + commas(&args) + ")"), f.ret)
+
+fn construct(c: &mut C, s: int) -> Val:
+    let d = c.structs[s].clone()
+    var tys: list[str] = []
+    var names: list[str] = []
+    var modes: list[int] = []
+    for f in d.fields:
+        tys.push(f.ty)
+        names.push(f.name)
+        modes.push(BY_VALUE)
+    emit_type(&mut c, d.name)
+    var pre: list[str] = []
+    let args = call_args(&mut c, &mut pre, &tys, &modes, &names, "'" + d.name + "'")
+    if len(args) == 0:
+        return rv("((" + ctype(d.name) + "){0})", d.name)
+    return rv(seq(&pre, "((" + ctype(d.name) + "){" + commas(&args) + "})"), d.name)
+
+fn make_variant(c: &mut C, ty: str, name: str) -> Val:
+    # `Var(args)` or `Var` of enum type ty; the name token is already eaten.
+    emit_type(&mut c, ty)
+    let vs = variants_of(&c, ty)
+    var k = -1
+    for j in 0..len(vs):
+        if vs[j].name == name:
+            k = j
+    if k < 0:
+        return fail(&c, ty + " has no variant '" + name + "'")
+    let v = vs[k].clone()
+    let mk = "mk_" + mangle(ty) + "_" + name
+    if len(v.tys) == 0:
+        if at_op(&c, "("):
+            return fail(&c, "variant '" + name + "' takes no arguments")
+        return rv(mk + "()", ty)
+    if not at_op(&c, "("):
+        return fail(&c, "variant '" + name + "' needs arguments: " + name + "(...)")
+    var pre: list[str] = []
+    let args = value_args(&mut c, &mut pre, &v.tys, "'" + name + "'")
+    return rv(seq(&pre, mk + "(" + commas(&args) + ")"), ty)
+
+# ---- builtins ----
+
+fn to_str_code(c: &C, ty: str, code: str) -> str:
+    if ty == "str":
+        return code
+    if ty == "int":
+        return "sl_int_str(" + code + ")"
+    if ty == "u8":
+        return "sl_int_str((i64)(" + code + "))"
+    if ty == "char":
+        return "sl_char_str(" + code + ")"
+    if ty == "bool":
+        return "sl_bool_str(" + code + ")"
+    die(&c, "converting " + ty + " to str is not part of Silly Core")
+    return ""
+
+fn write_code(c: &C, f: str, ty: str, code: str) -> str:
+    if ty == "str":
+        return "sl_wr(" + f + ", " + code + ")"
+    if ty == "int":
+        return "sl_wr_int(" + f + ", " + code + ")"
+    if ty == "u8":
+        return "sl_wr_int(" + f + ", (i64)(" + code + "))"
+    if ty == "char":
+        return "sl_wr_char(" + f + ", " + code + ")"
+    if ty == "bool":
+        return "sl_wr_bool(" + f + ", " + code + ")"
+    die(&c, "printing " + ty + " is not part of Silly Core")
+    return ""
+
+fn one_arg(c: &mut C, want: str) -> Val:
+    expect_op(&mut c, "(")
+    let t = tok(&c)
+    let v = expr(&mut c, want)
+    expect_ty(&c, t, v, want)
+    expect_op(&mut c, ")")
+    return v
+
+fn print_call(c: &mut C, name: str) -> Val:
+    var f = "stdout"
+    if name == "eprint":
+        f = "stderr"
+    expect_op(&mut c, "(")
+    var pre: list[str] = []
+    var items: list[str] = []
+    var sep = "sl_lit(\" \", 1)"
+    var end = ""
+    while not at_op(&c, ")"):
+        if at_kind(&c, K_NAME) and next_is_op(&c, "="):
+            let kw = tok(&c).text
+            c.pos += 2
+            let v = typed(&mut c, "str")
+            if kw == "sep":
+                sep = pin(&mut c, &mut pre, v)
+            elif kw == "end":
+                end = pin(&mut c, &mut pre, v)
+            else:
+                die(&c, name + "() has no parameter '" + kw + "'")
+        else:
+            let v = expr(&mut c, "")
+            if v.ty == "void":
+                die(&c, "this expression has no value to print")
+            items.push(write_code(&c, f, v.ty, pin(&mut c, &mut pre, v)))
+        if not eat_op(&mut c, ","):
+            break
+    expect_op(&mut c, ")")
+    for i in 0..len(items):
+        if i > 0:
+            pre.push("sl_wr(" + f + ", " + sep + ")")
+        pre.push(items[i])
+    if end == "":
+        pre.push("fputc('\\n', " + f + ")")
+    else:
+        pre.push("sl_wr(" + f + ", " + end + ")")
+    c.fx += 1
+    return rv(seq(&pre, "(void)0"), "void")
+
+fn builtin(c: &mut C, name: str, want: str) -> Val:
+    # A call of a builtin function, or an empty Val (ty "") if name is not one.
+    let w = here(&c)
+    if name == "print" or name == "eprint":
+        return print_call(&mut c, name)
+    if name == "len":
+        let v = one_arg(&mut c, "")
+        if v.ty != "str" and not is_list(v.ty):
+            die(&c, "len() needs a str, list, array or map, found " + v.ty)
+        return rv("(" + v.code + ").len", "int")
+    if name == "str":
+        let v = one_arg(&mut c, "")
+        return rv(to_str_code(&c, v.ty, v.code), "str")
+    if name == "ord":
+        let v = one_arg(&mut c, "char")
+        return rv("((i64)(" + v.code + "))", "int")
+    if name == "chr":
+        let v = one_arg(&mut c, "int")
+        c.fx += 1
+        return rv("sl_chr(" + v.code + ", " + w + ")", "char")
+    if name == "abs":
+        let v = one_arg(&mut c, "int")
+        var pre: list[str] = []
+        let t = pin(&mut c, &mut pre, v)
+        return rv(seq(&pre, "(" + t + " < 0 ? -" + t + " : " + t + ")"), "int")
+    if name == "min" or name == "max":
+        expect_op(&mut c, "(")
+        let a = expr(&mut c, want)
+        expect_op(&mut c, ",")
+        let b = typed(&mut c, a.ty)
+        expect_op(&mut c, ")")
+        if not is_scalar(a.ty) and a.ty != "str":
+            die(&c, name + "() needs numbers, chars or strings, found " + a.ty)
+        var pre: list[str] = []
+        let x = pin(&mut c, &mut pre, a)
+        let y = pin(&mut c, &mut pre, b)
+        var op = " < "
+        if name == "max":
+            op = " > "
+        var test = x + op + y
+        if a.ty == "str":
+            test = "sl_str_cmp(" + x + ", " + y + ")" + op + "0"
+        return rv(seq(&pre, "(" + test + " ? " + x + " : " + y + ")"), a.ty)
+    if name == "input":
+        expect_op(&mut c, "(")
+        var pre: list[str] = []
+        if not at_op(&c, ")"):
+            let p = typed(&mut c, "str")
+            pre.push("sl_wr(stdout, " + p.code + ")")
+            pre.push("fflush(stdout)")
+        expect_op(&mut c, ")")
+        let ty = "Option[str]"
+        emit_type(&mut c, ty)
+        let t = tmp_c(&mut c, "sl_str")
+        let m = "mk_" + mangle(ty)
+        c.fx += 1
+        return rv(seq(&pre, "(sl_input(&" + t + ") ? " + m + "_Some(" + t + ") : " + m + "_None())"), ty)
+    if name == "read_file":
+        let p = one_arg(&mut c, "str")
+        let ty = "Result[str, str]"
+        emit_type(&mut c, ty)
+        let a = tmp_c(&mut c, "sl_str")
+        let b = tmp_c(&mut c, "sl_str")
+        let m = "mk_" + mangle(ty)
+        c.fx += 1
+        return rv("(sl_read_file(" + p.code + ", &" + a + ", &" + b + ") ? " + m + "_Ok(" + a + ") : " + m + "_Err(" + b + "))", ty)
+    if name == "write_file":
+        var pre: list[str] = []
+        var tys: list[str] = ["str", "str"]
+        let xs = value_args(&mut c, &mut pre, &tys, "write_file()")
+        c.fx += 1
+        return rv(seq(&pre, "sl_write_file(" + xs[0] + ", " + xs[1] + ")"), "bool")
+    if name == "args":
+        expect_op(&mut c, "(")
+        expect_op(&mut c, ")")
+        emit_type(&mut c, "list[str]")
+        return rv("sl_args()", "list[str]")
+    if name == "exit":
+        let v = one_arg(&mut c, "int")
+        c.fx += 1
+        c.diverged = true
+        return rv("sl_exit(" + v.code + ")", "void")
+    if name == "panic":
+        expect_op(&mut c, "(")
+        var code = "sl_panic(" + w + ", \"explicit panic\")"
+        if not at_op(&c, ")"):
+            let m = typed(&mut c, "str")
+            code = "sl_panic_str(" + w + ", " + m.code + ")"
+        expect_op(&mut c, ")")
+        c.fx += 1
+        c.diverged = true
+        return rv(code, "void")
+    return rv("", "")
+
+# ---- primary expressions ----
+
+fn list_lit(c: &mut C, want: str) -> Val:
+    let open = tok(&c)
+    c.pos += 1
+    var el = ""
+    if is_list(want):
+        el = inner(want)
+    if at_op(&c, "]"):
+        c.pos += 1
+        if el == "":
+            err_at(&c, open, "cannot infer the type of an empty list")
+        emit_type(&mut c, want)
+        return rv("((" + ctype(want) + "){0})", want)
+    var codes: list[str] = []
+    while not at_op(&c, "]"):
+        let start = tok(&c)
+        let v = expr(&mut c, el)
+        if el == "":
+            el = v.ty
+        expect_ty(&c, start, v, el)
+        codes.push(v.code)
+        if not eat_op(&mut c, ","):
+            break
+    expect_op(&mut c, "]")
+    let ty = "list[" + el + "]"
+    let t = new_tmp(&mut c, ty)
+    var s = "(" + t + " = (" + ctype(ty) + "){0}"
+    for x in codes:
+        s += ", push_" + mangle(ty) + "(&" + t + ", " + x + ")"
+    c.fx += 1
+    return rv(s + ", " + t + ")", ty)
+
+fn name_expr(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    let name = t.text
+    c.pos += 1
+    let call = at_op(&c, "(")
+    let vi = find_var(&c, name)
+    if vi >= 0:
+        if call:
+            return fail(&c, "closures are not part of Silly Core")
+        let v = c.vars[vi]
+        return Val(v.cname, v.ty, true, v.mutable)
+    let ki = find_const(&c, name)
+    if ki >= 0:
+        let k = c.consts[ki]
+        return rv(k.code, k.ty)
+    if call:
+        let fi = find_fn(&c, name)
+        if fi >= 0:
+            return call_fn(&mut c, fi)
+        let b = builtin(&mut c, name, want)
+        if b.ty != "":
+            return b
+        let si = find_struct(&c, name)
+        if si >= 0:
+            return construct(&mut c, si)
+    if find_enum(&c, name) >= 0 and at_op(&c, "."):
+        c.pos += 1
+        let var_name = expect_name(&mut c)
+        return make_variant(&mut c, name, var_name)
+    if name == "Some":
+        if not call:
+            return fail(&c, "Some needs a value: Some(x)")
+        if want.starts_with("Option["):
+            return make_variant(&mut c, want, "Some")
+        expect_op(&mut c, "(")
+        let v = expr(&mut c, "")
+        expect_op(&mut c, ")")
+        let ty = "Option[" + v.ty + "]"
+        emit_type(&mut c, ty)
+        return rv("mk_" + mangle(ty) + "_Some(" + v.code + ")", ty)
+    if name == "None":
+        if not want.starts_with("Option["):
+            err_at(&c, t, "cannot infer the type of None")
+        return make_variant(&mut c, want, "None")
+    if name == "Ok" or name == "Err":
+        if not want.starts_with("Result["):
+            err_at(&c, t, "cannot infer the type of " + name + "(...)")
+        return make_variant(&mut c, want, name)
+    if name == "true" or name == "false":
+        return rv(name, "bool")
+    if name == "f" and at_kind(&c, K_STR) and tok(&c).line == t.line and tok(&c).col == t.col + 1:
+        return fail(&c, "f-strings are not part of Silly Core")
+    if c.kws.contains(name):
+        err_at(&c, t, "expected an expression, found '" + name + "'")
+    err_at(&c, t, "unknown name '" + name + "'")
+    return rv("", "")
+
+fn primary(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    if t.kind == K_INT:
+        c.pos += 1
+        if want == "u8":
+            let n = int_value(t.text)
+            if n > 255:
+                err_at(&c, t, "integer literal " + str(n) + " does not fit in u8 (range 0..=255)")
+            return rv("((uint8_t)" + t.text + ")", "u8")
+        return rv("((i64)" + t.text + ")", "int")
+    if t.kind == K_CHAR:
+        c.pos += 1
+        if want == "u8":
+            if t.text.parse_int().unwrap() > 255:
+                err_at(&c, t, "character does not fit in a u8")
+            return rv("((uint8_t)" + t.text + ")", "u8")
+        return rv("((uint32_t)" + t.text + ")", "char")
+    if t.kind == K_STR:
+        c.pos += 1
+        return rv(c_lit(t.text), "str")
+    if t.kind == K_NAME:
+        return name_expr(&mut c, want)
+    if eat_op(&mut c, "("):
+        let v = expr(&mut c, want)
+        if at_op(&c, ","):
+            return fail(&c, "tuples are not part of Silly Core")
+        expect_op(&mut c, ")")
+        return rv("(" + v.code + ")", v.ty)
+    if at_op(&c, "["):
+        return list_lit(&mut c, want)
+    if at_op(&c, "{"):
+        return fail(&c, "maps and sets are not part of Silly Core")
+    return fail(&c, "expected an expression, found " + describe(t))
+
+# ---- list helpers, generated on first use ----
+
+fn eq_code(c: &C, t: str, a: str, b: str) -> str:
+    if is_scalar(t):
+        return "(" + a + " == " + b + ")"
+    if t == "str":
+        return "sl_str_eq(" + a + ", " + b + ")"
+    die(&c, "comparing " + t + " values is not part of Silly Core")
+    return ""
+
+fn list_helper(c: &mut C, t: str, op: str) -> str:
+    # The name of helper op for list type t, defining it the first time.
+    let m = mangle(t)
+    let name = op + "_" + m
+    if c.done.contains(name):
+        return name
+    c.done.push(name)
+    let ct = ctype(t)
+    let el = inner(t)
+    let ce = ctype(el)
+    let p = ce + " *p = (" + ce + " *)l->ptr;"
+    let q = ce + " *p = (" + ce + " *)l.ptr;"
+    var h = ""
+    if op == "rm":
+        h = "static " + ce + " rm_" + m + "(" + ct + " *l, i64 i, const char *w) { i64 j = sl_index(i, l->len, w); " + p + " " + ce + " x = p[j]; memmove(p + j, p + j + 1, (size_t)(l->len - j - 1) * sizeof(" + ce + ")); l->len--; return x; }"
+    elif op == "ins":
+        h = "static void ins_" + m + "(" + ct + " *l, i64 i, " + ce + " x, const char *w) { if (i < 0) i += l->len; if (i < 0 || i > l->len) sl_oob(i, l->len, w); push_" + m + "(l, x); " + p + " memmove(p + i + 1, p + i, (size_t)(l->len - 1 - i) * sizeof(" + ce + ")); p[i] = x; }"
+    elif op == "swp":
+        h = "static void swp_" + m + "(" + ct + " *l, i64 i, i64 j, const char *w) { i64 a = sl_index(i, l->len, w), b = sl_index(j, l->len, w); " + p + " " + ce + " t = p[a]; p[a] = p[b]; p[b] = t; }"
+    elif op == "trn":
+        h = "static void trn_" + m + "(" + ct + " *l, i64 n) { if (n < 0) n = 0; if (n < l->len) l->len = n; }"
+    elif op == "rev":
+        h = "static void rev_" + m + "(" + ct + " *l) { " + p + " for (i64 i = 0, j = l->len - 1; i < j; i++, j--) { " + ce + " t = p[i]; p[i] = p[j]; p[j] = t; } }"
+    elif op == "ext":
+        h = "static void ext_" + m + "(" + ct + " *l, " + ct + " o) { for (i64 i = 0; i < o.len; i++) push_" + m + "(l, ((" + ce + " *)o.ptr)[i]); }"
+    elif op == "has":
+        h = "static bool has_" + m + "(" + ct + " l, " + ce + " x) { " + q + " for (i64 i = 0; i < l.len; i++) if (" + eq_code(&c, el, "p[i]", "x") + ") return true; return false; }"
+    elif op == "idx":
+        h = "static i64 idx_" + m + "(" + ct + " l, " + ce + " x) { " + q + " for (i64 i = 0; i < l.len; i++) if (" + eq_code(&c, el, "p[i]", "x") + ") return i; return -1; }"
+    elif op == "get":
+        let ot = "Option[" + el + "]"
+        emit_type(&mut c, ot)
+        let mk = "mk_" + mangle(ot)
+        h = "static " + ctype(ot) + " get_" + m + "(" + ct + " l, i64 i) { if (i < 0) i += l.len; if (i < 0 || i >= l.len) return " + mk + "_None(); return " + mk + "_Some(((" + ce + " *)l.ptr)[i]); }"
+    elif op == "sort":
+        var cmp = "(x > y) - (x < y)"
+        if el == "str":
+            cmp = "(sl_str_cmp(x, y) > 0) - (sl_str_cmp(x, y) < 0)"
+        elif not is_scalar(el):
+            die(&c, "sorting a list of " + el + " is not part of Silly Core")
+        c.helpers.push("static int cmp_" + m + "(const void *a, const void *b) { " + ce + " x = *(const " + ce + " *)a, y = *(const " + ce + " *)b; return " + cmp + "; }")
+        h = "static void sort_" + m + "(" + ct + " *l) { if (l->len > 1) qsort(l->ptr, (size_t)l->len, sizeof(" + ce + "), cmp_" + m + "); }"
+    c.helpers.push(h)
+    return name
+
+# ---- methods ----
+
+fn opt_some(c: &mut C, ty: str, x: str) -> str:
+    emit_type(&mut c, ty)
+    return "mk_" + mangle(ty) + "_Some(" + x + ")"
+
+fn opt_none(c: &mut C, ty: str) -> str:
+    emit_type(&mut c, ty)
+    return "mk_" + mangle(ty) + "_None()"
+
+fn method(c: &mut C, v: Val, name: str, fr: bool) -> Val:
+    # v.name(args); fr: the receiver's code has effects.
+    let t = v.ty
+    let w = here(&c)
+    var tys: list[str] = []
+    var ret = "?"
+    var mutating = false
+    if is_list(t):
+        let el = inner(t)
+        if name == "push":
+            tys.push(el)
+            ret = "void"
+            mutating = true
+        elif name == "pop":
+            ret = el
+            mutating = true
+        elif name == "insert":
+            tys.push("int")
+            tys.push(el)
+            ret = "void"
+            mutating = true
+        elif name == "remove":
+            tys.push("int")
+            ret = el
+            mutating = true
+        elif name == "swap":
+            tys.push("int")
+            tys.push("int")
+            ret = "void"
+            mutating = true
+        elif name == "reverse" or name == "clear" or name == "sort":
+            ret = "void"
+            mutating = true
+        elif name == "extend":
+            tys.push(t)
+            ret = "void"
+            mutating = true
+        elif name == "truncate":
+            tys.push("int")
+            ret = "void"
+            mutating = true
+        elif name == "len":
+            ret = "int"
+        elif name == "is_empty":
+            ret = "bool"
+        elif name == "contains":
+            tys.push(el)
+            ret = "bool"
+        elif name == "index_of":
+            tys.push(el)
+            ret = "Option[int]"
+        elif name == "clone":
+            ret = t
+        elif name == "get":
+            tys.push("int")
+            ret = "Option[" + el + "]"
+        elif name == "first" or name == "last":
+            ret = "Option[" + el + "]"
+    elif t == "str":
+        if name == "len" or name == "count":
+            ret = "int"
+        elif name == "is_empty":
+            ret = "bool"
+        elif name == "contains" or name == "starts_with" or name == "ends_with":
+            ret = "bool"
+        elif name == "find":
+            ret = "Option[int]"
+        elif name == "split" or name == "lines":
+            ret = "list[str]"
+        elif name == "trim" or name == "trim_start" or name == "trim_end" or name == "upper" or name == "lower" or name == "clone":
+            ret = "str"
+        elif name == "replace":
+            tys.push("str")
+            tys.push("str")
+            ret = "str"
+        elif name == "join":
+            tys.push("list[str]")
+            ret = "str"
+        elif name == "chars":
+            ret = "list[char]"
+        elif name == "bytes":
+            ret = "list[u8]"
+        elif name == "parse_int":
+            ret = "Option[int]"
+        if name == "count" or name == "contains" or name == "starts_with" or name == "ends_with" or name == "find":
+            tys.push("*")
+        if name == "split" and not next_is_op(&c, ")"):
+            tys.push("*")
+    elif t.starts_with("Option[") or t.starts_with("Result["):
+        let a = inner(t)
+        var ok = a
+        var bad = ""
+        if t.starts_with("Result["):
+            let ab = type_args(t)
+            ok = ab[0]
+            bad = ab[1]
+        if name == "is_some" or name == "is_none":
+            if bad == "":
+                ret = "bool"
+        elif name == "is_ok" or name == "is_err":
+            if bad != "":
+                ret = "bool"
+        elif name == "unwrap":
+            ret = ok
+        elif name == "expect":
+            tys.push("str")
+            ret = ok
+        elif name == "unwrap_or":
+            tys.push(ok)
+            ret = ok
+        elif name == "unwrap_err":
+            if bad != "":
+                ret = bad
+    if ret == "?" and name == "clone":
+        ret = t
+    if ret == "?":
+        return fail(&c, t + " has no method '" + name + "'")
+    if mutating:
+        if not v.place:
+            return fail(&c, "cannot call a `mut self` method on a temporary value")
+        if not v.mutable:
+            return fail(&c, "cannot modify this value: it is not mutable")
+    emit_type(&mut c, ret)
+    var pre: list[str] = []
+    let f0 = c.fx
+    let a = value_args(&mut c, &mut pre, &tys, "'" + name + "'")
+    var r = v.code
+    var all: list[str] = []
+    if c.fx != f0 and fr:
+        if v.place:
+            let p = tmp_c(&mut c, ctype(t) + " *")
+            all.push(p + " = &" + v.code)
+            r = "(*" + p + ")"
+        else:
+            r = pin(&mut c, &mut all, v)
+    for s in pre:
+        all.push(s)
+    c.fx += 1
+    if name == "clone":
+        return rv(seq(&all, clone_code(&mut c, t, r)), ret)
+    if is_list(t):
+        let m = mangle(t)
+        if name == "push":
+            return rv(seq(&all, "push_" + m + "(&" + r + ", " + a[0] + ")"), ret)
+        if name == "pop":
+            return rv(seq(&all, "pop_" + m + "(&" + r + ", " + w + ")"), ret)
+        if name == "clear":
+            return rv(seq(&all, "(void)((" + r + ").len = 0)"), ret)
+        if name == "len":
+            return rv(seq(&all, "(" + r + ").len"), ret)
+        if name == "is_empty":
+            return rv(seq(&all, "((" + r + ").len == 0)"), ret)
+        if name == "clone":
+            return rv(seq(&all, clone_code(&mut c, t, r)), ret)
+        if name == "first":
+            return rv(seq(&all, list_helper(&mut c, t, "get") + "(" + r + ", 0)"), ret)
+        if name == "last":
+            return rv(seq(&all, list_helper(&mut c, t, "get") + "(" + r + ", -1)"), ret)
+        if name == "get":
+            return rv(seq(&all, list_helper(&mut c, t, "get") + "(" + r + ", " + a[0] + ")"), ret)
+        if name == "contains":
+            return rv(seq(&all, list_helper(&mut c, t, "has") + "(" + r + ", " + a[0] + ")"), ret)
+        if name == "index_of":
+            let i = tmp_c(&mut c, "i64")
+            let f = list_helper(&mut c, t, "idx")
+            return rv(seq(&all, "(" + i + " = " + f + "(" + r + ", " + a[0] + "), " + i + " >= 0 ? " + opt_some(&mut c, ret, i) + " : " + opt_none(&mut c, ret) + ")"), ret)
+        var op = ""
+        var tail = ""
+        if name == "insert":
+            op = "ins"
+            tail = ", " + a[0] + ", " + a[1] + ", " + w
+        elif name == "remove":
+            op = "rm"
+            tail = ", " + a[0] + ", " + w
+        elif name == "swap":
+            op = "swp"
+            tail = ", " + a[0] + ", " + a[1] + ", " + w
+        elif name == "truncate":
+            op = "trn"
+            tail = ", " + a[0]
+        elif name == "extend":
+            op = "ext"
+            tail = ", " + a[0]
+        elif name == "reverse":
+            op = "rev"
+        else:
+            op = "sort"
+        return rv(seq(&all, list_helper(&mut c, t, op) + "(&" + r + tail + ")"), ret)
+    if t == "str":
+        if name == "len":
+            return rv(seq(&all, "(" + r + ").len"), ret)
+        if name == "is_empty":
+            return rv(seq(&all, "((" + r + ").len == 0)"), ret)
+        if name == "clone":
+            return rv(seq(&all, r), ret)
+        if name == "contains":
+            return rv(seq(&all, "(sl_str_find(" + r + ", " + a[0] + ") >= 0)"), ret)
+        if name == "starts_with":
+            return rv(seq(&all, "sl_str_starts(" + r + ", " + a[0] + ")"), ret)
+        if name == "ends_with":
+            return rv(seq(&all, "sl_str_ends(" + r + ", " + a[0] + ")"), ret)
+        if name == "count":
+            return rv(seq(&all, "sl_str_count(" + r + ", " + a[0] + ")"), ret)
+        if name == "find":
+            let i = tmp_c(&mut c, "i64")
+            return rv(seq(&all, "(" + i + " = sl_str_find(" + r + ", " + a[0] + "), " + i + " >= 0 ? " + opt_some(&mut c, ret, i) + " : " + opt_none(&mut c, ret) + ")"), ret)
+        if name == "split":
+            if len(a) == 0:
+                return rv(seq(&all, "sl_str_split(" + r + ", sl_lit(\"\", 0), true)"), ret)
+            return rv(seq(&all, "sl_str_split(" + r + ", " + a[0] + ", false)"), ret)
+        if name == "lines":
+            return rv(seq(&all, "sl_str_lines(" + r + ")"), ret)
+        if name == "trim":
+            return rv(seq(&all, "sl_str_trim(" + r + ")"), ret)
+        if name == "trim_start":
+            return rv(seq(&all, "sl_str_trim_start(" + r + ")"), ret)
+        if name == "trim_end":
+            return rv(seq(&all, "sl_str_trim_end(" + r + ")"), ret)
+        if name == "upper":
+            return rv(seq(&all, "sl_str_case(" + r + ", true)"), ret)
+        if name == "lower":
+            return rv(seq(&all, "sl_str_case(" + r + ", false)"), ret)
+        if name == "replace":
+            return rv(seq(&all, "sl_str_replace(" + r + ", " + a[0] + ", " + a[1] + ")"), ret)
+        if name == "join":
+            let l = tmp_c(&mut c, "sl_list")
+            return rv(seq(&all, "(" + l + " = " + a[0] + ", sl_str_join(" + r + ", (const sl_str *)" + l + ".ptr, " + l + ".len))"), ret)
+        if name == "chars":
+            return rv(seq(&all, "sl_str_chars(" + r + ")"), ret)
+        if name == "bytes":
+            return rv(seq(&all, "sl_str_bytes(" + r + ")"), ret)
+        let i = tmp_c(&mut c, "i64")
+        return rv(seq(&all, "(sl_parse_int(" + r + ", &" + i + ") ? " + opt_some(&mut c, ret, i) + " : " + opt_none(&mut c, ret) + ")"), ret)
+    # Option and Result: tags None 0, Some 1; Ok 0, Err 1.
+    let is_opt = t.starts_with("Option[")
+    var good = "Ok"
+    var good_tag = "0"
+    if is_opt:
+        good = "Some"
+        good_tag = "1"
+    if name == "is_some" or name == "is_ok":
+        return rv(seq(&all, "((" + r + ").tag == " + good_tag + ")"), ret)
+    if name == "is_none" or name == "is_err":
+        return rv(seq(&all, "((" + r + ").tag != " + good_tag + ")"), ret)
+    let x = pin(&mut c, &mut all, Val(r, t, false, false))
+    let val = x + ".u." + good + ".a0"
+    if name == "unwrap_or":
+        let d = tmp_c(&mut c, ctype(ret))
+        all.push(d + " = " + a[0])
+        return rv(seq(&all, "(" + x + ".tag == " + good_tag + " ? " + val + " : " + d + ")"), ret)
+    var msg = ""
+    if name == "unwrap_err":
+        all.push("(" + x + ".tag != 1 ? sl_panic(\"<std>/prelude.silly:77:30\", \"called unwrap_err() on an Ok value\") : (void)0)")
+        return rv(seq(&all, x + ".u.Err.a0"), ret)
+    if is_opt and name == "unwrap":
+        msg = "sl_panic(\"<std>/prelude.silly:18:29\", \"called unwrap() on a None value\")"
+    elif is_opt:
+        msg = "sl_panic_str(\"<std>/prelude.silly:24:29\", " + pin(&mut c, &mut all, rv(a[0], "str")) + ")"
+    else:
+        let e = to_str_code(&c, type_args(t)[1], x + ".u.Err.a0")
+        if name == "unwrap":
+            msg = "sl_panic_str(\"<std>/prelude.silly:60:31\", sl_str_cat(" + c_lit("called unwrap() on an Err value: ") + ", " + e + "))"
+        else:
+            let m = pin(&mut c, &mut all, rv(a[0], "str"))
+            msg = "sl_panic_str(\"<std>/prelude.silly:66:31\", sl_str_cat(sl_str_cat(" + m + ", sl_lit(\": \", 2)), " + e + "))"
+    all.push("(" + x + ".tag != " + good_tag + " ? " + msg + " : (void)0)")
+    return rv(seq(&all, val), ret)
+
+# ---- postfix: fields, indexing, slices, calls of methods, `?` ----
+
+fn field(c: &mut C, v: Val, name: str) -> Val:
+    let s = find_struct(&c, v.ty)
+    if s >= 0:
+        for f in c.structs[s].fields:
+            if f.name == name:
+                return Val("(" + v.code + ").m_" + name, f.ty, v.place, v.mutable)
+    return fail(&c, v.ty + " has no field '" + name + "'")
+
+fn index(c: &mut C, v: Val, fr: bool) -> Val:
+    let w = here(&c)
+    c.pos += 1
+    if v.ty != "str" and not is_list(v.ty):
+        return fail(&c, v.ty + " cannot be indexed")
+    var pre: list[str] = []
+    let f0 = c.fx
+    var a = "0"
+    if not at_op(&c, ":"):
+        a = typed(&mut c, "int").code
+    if at_op(&c, ":"):
+        c.pos += 1
+        if v.ty != "str":
+            return fail(&c, "list slices are not part of Silly Core")
+        var b = "0"
+        var has_b = "false"
+        if not at_op(&c, "]"):
+            let fa = c.fx != f0
+            if fa:
+                a = pin(&mut c, &mut pre, rv(a, "int"))
+            b = typed(&mut c, "int").code
+            has_b = "true"
+        expect_op(&mut c, "]")
+        var r = v.code
+        if fr and c.fx != f0:
+            var p2: list[str] = []
+            r = pin(&mut c, &mut p2, v)
+            for s in pre:
+                p2.push(s)
+            pre = p2
+        c.fx += 1
+        return rv(seq(&pre, "sl_str_slice(" + r + ", " + a + ", " + b + ", " + has_b + ", " + w + ")"), "str")
+    expect_op(&mut c, "]")
+    let ifx = c.fx != f0
+    c.fx += 1
+    if v.ty == "str":
+        var r = v.code
+        if fr and ifx:
+            r = pin(&mut c, &mut pre, v)
+        return rv(seq(&pre, "sl_str_at(" + r + ", " + a + ", " + w + ")"), "u8")
+    let at = "at_" + mangle(v.ty)
+    let el = inner(v.ty)
+    if not v.place:
+        let r = pin(&mut c, &mut pre, v)
+        return rv(seq(&pre, "(*" + at + "(&" + r + ", " + a + ", " + w + "))"), el)
+    if ifx:
+        let p = tmp_c(&mut c, ctype(v.ty) + " *")
+        return Val("(*(" + p + " = &" + v.code + ", " + at + "(" + p + ", " + a + ", " + w + ")))", el, true, v.mutable)
+    return Val("(*" + at + "(&" + v.code + ", " + a + ", " + w + "))", el, true, v.mutable)
+
+fn try_op(c: &mut C, v: Val) -> Val:
+    let is_opt = v.ty.starts_with("Option[")
+    if is_opt and not c.ret.starts_with("Option["):
+        return fail(&c, "`?` on an Option can only be used in a function that returns an Option")
+    if not is_opt and not v.ty.starts_with("Result["):
+        return fail(&c, "`?` needs an Option or a Result, found " + v.ty)
+    if not is_opt and not c.ret.starts_with("Result["):
+        return fail(&c, "`?` on a Result can only be used in a function that returns a Result")
+    c.pos += 1
+    let q = fresh(&mut c, "q")
+    var reset = ""
+    if c.reset:
+        reset = "ds_top = _mark; "
+    var bad = "0"
+    var good = "Some"
+    var ret = "return " + opt_none(&mut c, c.ret) + ";"
+    if not is_opt:
+        bad = "1"
+        good = "Ok"
+        emit_type(&mut c, c.ret)
+        ret = "return mk_" + mangle(c.ret) + "_Err(" + q + ".u.Err.a0);"
+    c.fx += 1
+    let code = "({ " + ctype(v.ty) + " " + q + " = " + v.code + "; if (" + q + ".tag == " + bad + ") { " + reset + ret + " } " + q + ".u." + good + ".a0; })"
+    if is_opt:
+        return rv(code, inner(v.ty))
+    return rv(code, type_args(v.ty)[0])
+
+fn postfix(c: &mut C, want: str) -> Val:
+    let f0 = c.fx
+    var v = primary(&mut c, want)
+    loop:
+        let fr = c.fx != f0
+        if at_op(&c, "."):
+            c.pos += 1
+            let name = expect_name(&mut c)
+            if at_op(&c, "("):
+                v = method(&mut c, v, name, fr)
+            else:
+                v = field(&mut c, v, name)
+        elif at_op(&c, "["):
+            v = index(&mut c, v, fr)
+        elif at_op(&c, "?"):
+            v = try_op(&mut c, v)
+        else:
+            break
+    return v
+
+# ---- operators ----
+
+fn arith(c: &mut C, op: str, l: Val, r: Val, w: str) -> Val:
+    # l op r for an arithmetic or bitwise operator; also used by compound assignment.
+    if l.ty != r.ty:
+        return fail(&c, "operator '" + op + "' needs both sides to have the same type, found " + l.ty + " and " + r.ty)
+    let t = l.ty
+    let a = l.code
+    let b = r.code
+    if t == "str":
+        if op != "+":
+            return fail(&c, "operator '" + op + "' needs numbers, found str")
+        return rv("sl_str_cat(" + a + ", " + b + ")", t)
+    if t == "bool" and (op == "&" or op == "|" or op == "^"):
+        return rv("((bool)(" + a + " " + op + " " + b + "))", t)
+    if t != "int" and t != "u8":
+        return fail(&c, "operator '" + op + "' needs numbers, found " + t)
+    let ct = ctype(t)
+    if op == "<<" or op == ">>":
+        var mask = "63"
+        if t == "u8":
+            mask = "7"
+        if op == "<<" and t == "int":
+            return rv("((i64)((uint64_t)(" + a + ") << ((" + b + ") & 63)))", t)
+        return rv("((" + ct + ")((" + a + ") " + op + " ((" + b + ") & " + mask + ")))", t)
+    var f = ""
+    if op == "/":
+        f = "sl_div"
+    elif op == "//":
+        f = "sl_floordiv"
+    elif op == "%":
+        f = "sl_mod"
+    if f != "":
+        c.fx += 1
+        return rv("((" + ct + ")" + f + "(" + a + ", " + b + ", " + w + "))", t)
+    return rv("((" + ct + ")(" + a + " " + op + " " + b + "))", t)
+
+fn power(c: &mut C, want: str) -> Val:
+    let b = postfix(&mut c, want)
+    if not at_op(&c, "**"):
+        return b
+    let w = here(&c)
+    c.pos += 1
+    let f0 = c.fx
+    let e = unary(&mut c, "int")
+    if b.ty != "int" or e.ty != "int":
+        return fail(&c, "operator '**' needs integers, found " + b.ty + " and " + e.ty)
+    var pre: list[str] = []
+    var x = b.code
+    if c.fx != f0:
+        x = pin(&mut c, &mut pre, b)
+    c.fx += 1
+    return rv(seq(&pre, "sl_pow(" + x + ", " + e.code + ", " + w + ")"), "int")
+
+fn unary(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    if eat_op(&mut c, "-"):
+        let n = tok(&c)
+        if n.kind == K_INT and not next_is_op(&c, "**") and not next_is_op(&c, ".") and not next_is_op(&c, "["):
+            c.pos += 1
+            if want == "u8":
+                err_at(&c, t, "integer literal -" + str(int_value(n.text)) + " does not fit in u8 (range 0..=255)")
+            return rv("((i64)-" + n.text + ")", "int")
+        let v = unary(&mut c, want)
+        if v.ty != "int" and v.ty != "u8":
+            err_at(&c, t, "operator '-' needs numbers, found " + v.ty)
+        return rv("((" + ctype(v.ty) + ")(-(" + v.code + ")))", v.ty)
+    if eat_op(&mut c, "~"):
+        let v = unary(&mut c, want)
+        if v.ty != "int" and v.ty != "u8":
+            err_at(&c, t, "operator '~' needs integers, found " + v.ty)
+        return rv("((" + ctype(v.ty) + ")(~(" + v.code + ")))", v.ty)
+    if at_op(&c, "&"):
+        return fail(&c, "`&` can only be used on a function argument")
+    return power(&mut c, want)
+
+fn cast_expr(c: &mut C, want: str) -> Val:
+    var v = unary(&mut c, want)
+    while at_kw(&c, "as"):
+        let w = here(&c)
+        c.pos += 1
+        let t = parse_type(&mut c)
+        if not is_scalar(t) or not is_scalar(v.ty):
+            return fail(&c, "cannot cast " + v.ty + " to " + t)
+        if t == v.ty:
+            v = rv(v.code, t)
+        elif t == "char":
+            c.fx += 1
+            v = rv("sl_chr((i64)(" + v.code + "), " + w + ")", t)
+        else:
+            v = rv("((" + ctype(t) + ")(" + v.code + "))", t)
+    return v
+
+fn level_op(c: &C, lvl: int) -> str:
+    # The binary operator at the current token if it belongs to precedence level lvl.
+    let t = tok(&c)
+    if t.kind != K_OP:
+        return ""
+    let s = t.text
+    if lvl == 0 and s == "|":
+        return s
+    if lvl == 1 and s == "^":
+        return s
+    if lvl == 2 and s == "&":
+        return s
+    if lvl == 3 and (s == "<<" or s == ">>"):
+        return s
+    if lvl == 4 and (s == "+" or s == "-"):
+        return s
+    if lvl == 5 and (s == "*" or s == "/" or s == "%" or s == "//"):
+        return s
+    return ""
+
+fn bin_level(c: &mut C, want: str, lvl: int) -> Val:
+    if lvl == 6:
+        return cast_expr(&mut c, want)
+    let f0 = c.fx
+    var l = bin_level(&mut c, want, lvl + 1)
+    loop:
+        let op = level_op(&c, lvl)
+        if op == "":
+            break
+        let w = here(&c)
+        c.pos += 1
+        let lfx = c.fx != f0
+        let f1 = c.fx
+        let r = bin_level(&mut c, l.ty, lvl + 1)
+        var pre: list[str] = []
+        var lv = l
+        if lfx or c.fx != f1:
+            lv = rv(pin(&mut c, &mut pre, l), l.ty)
+        let v = arith(&mut c, op, lv, r, w)
+        l = rv(seq(&pre, v.code), v.ty)
+    return l
+
+fn cmp_op(c: &C) -> str:
+    let t = tok(&c)
+    if t.kind == K_OP and (t.text == "==" or t.text == "!=" or t.text == "<" or t.text == ">" or t.text == "<=" or t.text == ">="):
+        return t.text
+    if at_kw(&c, "in"):
+        return "in"
+    if at_kw(&c, "not") and c.toks[c.pos + 1].kind == K_NAME and c.toks[c.pos + 1].text == "in":
+        return "not in"
+    return ""
+
+fn compare(c: &mut C, want: str) -> Val:
+    # want is a hint for the left operand; a comparison's own type is always bool.
+    let f0 = c.fx
+    var hint = want
+    if want == "bool":
+        hint = ""
+    let l = bin_level(&mut c, hint, 0)
+    let op = cmp_op(&c)
+    if op == "":
+        return l
+    if op == "not in":
+        c.pos += 2
+    else:
+        c.pos += 1
+    let f1 = c.fx
+    var r = rv("", "")
+    if op == "in" or op == "not in":
+        if l.ty == "str" or l.ty == "char":
+            r = bin_level(&mut c, "str", 0)
+        else:
+            r = bin_level(&mut c, "list[" + l.ty + "]", 0)
+    else:
+        r = bin_level(&mut c, l.ty, 0)
+    if cmp_op(&c) != "":
+        return fail(&c, "chained comparisons are not part of Silly Core")
+    var pre: list[str] = []
+    var a = l.code
+    if c.fx != f0:
+        a = pin(&mut c, &mut pre, l)
+    var code = ""
+    if op == "in" or op == "not in":
+        if r.ty == "str":
+            var x = a
+            if l.ty == "char":
+                x = "sl_char_str(" + a + ")"
+            elif l.ty != "str":
+                return fail(&c, "`in` on a str needs a str or char on the left, found " + l.ty)
+            code = "(sl_str_find(" + r.code + ", " + x + ") >= 0)"
+        elif is_list(r.ty) and inner(r.ty) == l.ty:
+            code = list_helper(&mut c, r.ty, "has") + "(" + r.code + ", " + a + ")"
+        else:
+            return fail(&c, "cannot look for " + l.ty + " in " + r.ty)
+        if op == "not in":
+            code = "(!" + code + ")"
+        return rv(seq(&pre, code), "bool")
+    if l.ty != r.ty:
+        return fail(&c, "operator '" + op + "' needs both sides to have the same type, found " + l.ty + " and " + r.ty)
+    if l.ty == "str":
+        if op == "==":
+            code = "sl_str_eq(" + a + ", " + r.code + ")"
+        elif op == "!=":
+            code = "(!sl_str_eq(" + a + ", " + r.code + "))"
+        else:
+            code = "(sl_str_cmp(" + a + ", " + r.code + ") " + op + " 0)"
+    elif is_scalar(l.ty):
+        if l.ty == "bool" and op != "==" and op != "!=":
+            return fail(&c, "operator '" + op + "' cannot compare bool values")
+        code = "(" + a + " " + op + " " + r.code + ")"
+    else:
+        return fail(&c, "comparing " + l.ty + " values is not part of Silly Core")
+    return rv(seq(&pre, code), "bool")
+
+fn not_expr(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    if eat_kw(&mut c, "not"):
+        let v = not_expr(&mut c, "bool")
+        if v.ty != "bool":
+            err_at(&c, t, "operator 'not' needs a bool, found " + v.ty)
+        return rv("(!" + v.code + ")", "bool")
+    return compare(&mut c, want)
+
+fn and_expr(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    var l = not_expr(&mut c, want)
+    while at_kw(&c, "and"):
+        c.pos += 1
+        let r = not_expr(&mut c, "bool")
+        if l.ty != "bool" or r.ty != "bool":
+            err_at(&c, t, "operator 'and' needs bools, found " + l.ty + " and " + r.ty)
+        l = rv("(" + l.code + " && " + r.code + ")", "bool")
+    return l
+
+fn or_expr(c: &mut C, want: str) -> Val:
+    let t = tok(&c)
+    var l = and_expr(&mut c, want)
+    while at_kw(&c, "or"):
+        c.pos += 1
+        let r = and_expr(&mut c, "bool")
+        if l.ty != "bool" or r.ty != "bool":
+            err_at(&c, t, "operator 'or' needs bools, found " + l.ty + " and " + r.ty)
+        l = rv("(" + l.code + " || " + r.code + ")", "bool")
+    return l
+
+fn expr(c: &mut C, want: str) -> Val:
+    let a = or_expr(&mut c, want)
+    if not at_kw(&c, "if"):
+        return a
+    c.pos += 1
+    let cond = or_expr(&mut c, "bool")
+    if cond.ty != "bool":
+        return fail(&c, "a condition must be a bool, found " + cond.ty)
+    expect_kw(&mut c, "else")
+    let t = tok(&c)
+    let b = expr(&mut c, a.ty)
+    expect_ty(&c, t, b, a.ty)
+    return rv("((" + cond.code + ") ? (" + a.code + ") : (" + b.code + "))", a.ty)
+
+# ---- statements ----
+
+fn indent_in(c: &mut C):
+    c.indent += "    "
+
+fn indent_out(c: &mut C):
+    c.indent = c.indent[0:len(c.indent) - 4]
+
+fn at_end(c: &C) -> bool:
+    return at_kind(&c, K_NL) or at_kind(&c, K_DEDENT) or at_kind(&c, K_EOF)
+
+fn suite(c: &mut C):
+    # The body after a ':': an indented block, or one simple statement on the same line.
+    push_scope(&mut c)
+    if at_kind(&c, K_NL):
+        c.pos += 1
+        if not at_kind(&c, K_INDENT):
+            die(&c, "expected an indented block")
+        c.pos += 1
+        while not at_kind(&c, K_DEDENT) and not at_kind(&c, K_EOF):
+            if at_kind(&c, K_NL):
+                c.pos += 1
+            else:
+                statement(&mut c)
+        if at_kind(&c, K_DEDENT):
+            c.pos += 1
+    else:
+        simple_stmt(&mut c)
+    pop_scope(&mut c)
+
+fn cond_code(c: &mut C) -> str:
+    let t = tok(&c)
+    let v = expr(&mut c, "bool")
+    if v.ty != "bool":
+        err_at(&c, t, "a condition must be a bool, found " + v.ty)
+    return v.code
+
+fn return_code(c: &C, code: str) -> str:
+    if code == "":
+        if c.reset:
+            return "{ ds_top = _mark; return; }"
+        return "return;"
+    if c.reset:
+        return "{ " + ctype(c.ret) + " _r = " + code + "; ds_top = _mark; return _r; }"
+    return "return " + code + ";"
+
+fn let_stmt(c: &mut C, mutable: bool):
+    if at_op(&c, "("):
+        die(&c, "tuples are not part of Silly Core")
+    let name = expect_name(&mut c)
+    var want = ""
+    if eat_op(&mut c, ":"):
+        want = parse_type(&mut c)
+    if not at_op(&c, "="):
+        die(&c, "a variable needs a value: `" + name + " = ...`")
+    c.pos += 1
+    let t = tok(&c)
+    let v = expr(&mut c, want)
+    expect_ty(&c, t, v, want)
+    if v.ty == "void":
+        err_at(&c, t, "this expression has no value")
+    emit_type(&mut c, v.ty)
+    let cn = add_var(&mut c, name, v.ty, mutable, false)
+    emit(&mut c, ctype(v.ty) + " " + cn + " = " + v.code + ";")
+    expect_nl(&mut c)
+
+fn is_assign_op(s: str) -> bool:
+    return s == "=" or s == "+=" or s == "-=" or s == "*=" or s == "/=" or s == "//=" or s == "%=" or s == "&=" or s == "|=" or s == "^=" or s == "<<=" or s == ">>="
+
+fn assign_or_expr(c: &mut C):
+    let start = tok(&c)
+    let f0 = c.fx
+    let lhs = expr(&mut c, "")
+    let t = tok(&c)
+    if t.kind != K_OP or not is_assign_op(t.text):
+        if lhs.ty == "void":
+            emit(&mut c, lhs.code + ";")
+        else:
+            emit(&mut c, "(void)(" + lhs.code + ");")
+        expect_nl(&mut c)
+        return
+    if not lhs.place:
+        err_at(&c, start, "cannot assign to this expression")
+    if not lhs.mutable:
+        err_at(&c, start, "cannot assign to this value: it is not mutable")
+    let lfx = c.fx != f0
+    let w = here(&c)
+    c.pos += 1
+    let f1 = c.fx
+    let rt = tok(&c)
+    let r = expr(&mut c, lhs.ty)
+    expect_ty(&c, rt, r, lhs.ty)
+    var v = r.code
+    if c.fx != f1:
+        let tv = new_tmp(&mut c, r.ty)
+        emit(&mut c, tv + " = " + r.code + ";")
+        v = tv
+    if t.text == "=":
+        emit(&mut c, lhs.code + " = " + v + ";")
+    else:
+        var dst = lhs.code
+        if lfx:
+            let p = tmp_c(&mut c, ctype(lhs.ty) + " *")
+            emit(&mut c, p + " = &" + lhs.code + ";")
+            dst = "(*" + p + ")"
+        let op = t.text[0:len(t.text) - 1]
+        let res = arith(&mut c, op, Val(dst, lhs.ty, false, false), rv(v, r.ty), w)
+        emit(&mut c, dst + " = " + res.code + ";")
+    expect_nl(&mut c)
+
+fn simple_stmt(c: &mut C):
+    let t = tok(&c)
+    if eat_kw(&mut c, "let"):
+        let_stmt(&mut c, false)
+    elif eat_kw(&mut c, "var"):
+        let_stmt(&mut c, true)
+    elif eat_kw(&mut c, "return"):
+        if at_end(&c):
+            if c.ret != "void":
+                err_at(&c, t, "this function must return a " + c.ret)
+            emit(&mut c, return_code(&c, ""))
+        else:
+            let v = typed(&mut c, c.ret)
+            emit(&mut c, return_code(&c, v.code))
+        expect_nl(&mut c)
+    elif eat_kw(&mut c, "break"):
+        if c.loops == 0:
+            err_at(&c, t, "`break` outside a loop")
+        emit(&mut c, "break;")
+        expect_nl(&mut c)
+    elif eat_kw(&mut c, "continue"):
+        if c.loops == 0:
+            err_at(&c, t, "`continue` outside a loop")
+        emit(&mut c, "continue;")
+        expect_nl(&mut c)
+    elif eat_kw(&mut c, "pass"):
+        expect_nl(&mut c)
+    elif at_kw(&c, "assert") and not next_is_op(&c, "=") and not next_is_op(&c, "."):
+        c.pos += 1
+        let w = where_at(&c, t)
+        let cond = cond_code(&mut c)
+        var fail_code = ""
+        if eat_op(&mut c, ","):
+            let m = typed(&mut c, "str")
+            fail_code = "sl_panic_str(" + w + ", " + m.code + ");"
+        else:
+            let text = c.lines[t.line - 1].trim()
+            fail_code = "sl_panic(" + w + ", " + c_quote("assertion failed: " + text) + ");"
+        emit(&mut c, "if (!(" + cond + ")) " + fail_code)
+        expect_nl(&mut c)
+    else:
+        assign_or_expr(&mut c)
+
+fn if_stmt(c: &mut C):
+    # After `if` or `elif`; an elif chain becomes nested else blocks.
+    let cond = cond_code(&mut c)
+    expect_op(&mut c, ":")
+    emit(&mut c, "if (" + cond + ") {")
+    indent_in(&mut c)
+    suite(&mut c)
+    indent_out(&mut c)
+    if eat_kw(&mut c, "elif"):
+        emit(&mut c, "} else {")
+        indent_in(&mut c)
+        if_stmt(&mut c)
+        indent_out(&mut c)
+    elif eat_kw(&mut c, "else"):
+        expect_op(&mut c, ":")
+        emit(&mut c, "} else {")
+        indent_in(&mut c)
+        suite(&mut c)
+        indent_out(&mut c)
+    emit(&mut c, "}")
+
+fn loop_body(c: &mut C):
+    c.loops += 1
+    indent_in(&mut c)
+    suite(&mut c)
+    indent_out(&mut c)
+    c.loops -= 1
+
+fn while_stmt(c: &mut C):
+    emit(&mut c, "for (;;) {")
+    indent_in(&mut c)
+    let cond = cond_code(&mut c)
+    emit(&mut c, "if (!(" + cond + ")) break;")
+    indent_out(&mut c)
+    expect_op(&mut c, ":")
+    loop_body(&mut c)
+    emit(&mut c, "}")
+
+fn for_stmt(c: &mut C):
+    let name = expect_name(&mut c)
+    if at_op(&c, ","):
+        die(&c, "`for a, b in ...` is not part of Silly Core")
+    expect_kw(&mut c, "in")
+    let st = tok(&c)
+    var lo = rv("", "")
+    var hi = rv("", "")
+    var inclusive = false
+    var ranged = false
+    if at_kw(&c, "range") and next_is_op(&c, "(") and find_var(&c, "range") < 0 and find_fn(&c, "range") < 0:
+        c.pos += 2
+        lo = expr(&mut c, "int")
+        if eat_op(&mut c, ","):
+            hi = typed(&mut c, lo.ty)
+            if at_op(&c, ","):
+                die(&c, "range() with a step is not part of Silly Core")
+        else:
+            hi = lo
+            lo = rv("((i64)0)", lo.ty)
+        expect_op(&mut c, ")")
+        ranged = true
+    else:
+        lo = expr(&mut c, "")
+        if at_op(&c, "..") or at_op(&c, "..="):
+            inclusive = at_op(&c, "..=")
+            c.pos += 1
+            hi = typed(&mut c, lo.ty)
+            ranged = true
+    expect_op(&mut c, ":")
+    if ranged:
+        if lo.ty != "int" and lo.ty != "u8":
+            err_at(&c, st, "a range needs integers, found " + lo.ty)
+        let ct = ctype(lo.ty)
+        let i = fresh(&mut c, "i")
+        let h = fresh(&mut c, "h")
+        emit(&mut c, "{")
+        indent_in(&mut c)
+        emit(&mut c, ct + " " + i + " = " + lo.code + "; " + ct + " " + h + " = " + hi.code + ";")
+        push_scope(&mut c)
+        if inclusive:
+            let go = fresh(&mut c, "go")
+            emit(&mut c, "bool " + go + " = " + i + " <= " + h + ";")
+            emit(&mut c, "while (" + go + ") {")
+            let cn = add_var(&mut c, name, lo.ty, false, false)
+            emit(&mut c, "    " + ct + " " + cn + " = " + i + "; " + go + " = " + i + " != " + h + "; if (" + go + ") " + i + "++;")
+        else:
+            emit(&mut c, "for (; " + i + " < " + h + "; " + i + "++) {")
+            let cn = add_var(&mut c, name, lo.ty, false, false)
+            emit(&mut c, "    " + ct + " " + cn + " = " + i + ";")
+        loop_body(&mut c)
+        pop_scope(&mut c)
+        emit(&mut c, "}")
+        indent_out(&mut c)
+        emit(&mut c, "}")
+        return
+    var el = ""
+    var src = lo.code
+    if lo.ty == "str":
+        el = "char"
+        emit_type(&mut c, "list[char]")
+        src = "sl_str_chars(" + src + ")"
+    elif is_list(lo.ty):
+        el = inner(lo.ty)
+    else:
+        err_at(&c, st, "cannot iterate over " + lo.ty)
+    let l = fresh(&mut c, "l")
+    let j = fresh(&mut c, "j")
+    let ce = ctype(el)
+    emit(&mut c, "{")
+    indent_in(&mut c)
+    emit(&mut c, "sl_list " + l + " = " + src + ";")
+    emit(&mut c, "for (i64 " + j + " = 0; " + j + " < " + l + ".len; " + j + "++) {")
+    push_scope(&mut c)
+    let cn = add_var(&mut c, name, el, false, false)
+    emit(&mut c, "    " + ce + " " + cn + " = ((" + ce + " *)" + l + ".ptr)[" + j + "];")
+    loop_body(&mut c)
+    pop_scope(&mut c)
+    emit(&mut c, "}")
+    indent_out(&mut c)
+    emit(&mut c, "}")
+
+# ---- match ----
+
+struct Binds:
+    names: list[str]
+    tys: list[str]
+    codes: list[str]
+
+fn lit_pattern(c: &mut C, ty: str) -> str:
+    # The C code of a literal in a pattern of scalar type ty, or "" if no literal is here.
+    let t = tok(&c)
+    if t.kind == K_INT:
+        c.pos += 1
+        if ty == "u8":
+            return "((uint8_t)" + t.text + ")"
+        return "((i64)" + t.text + ")"
+    if t.kind == K_OP and t.text == "-" and c.toks[c.pos + 1].kind == K_INT:
+        c.pos += 2
+        return "((i64)-" + c.toks[c.pos - 1].text + ")"
+    if t.kind == K_CHAR:
+        c.pos += 1
+        if ty == "u8":
+            return "((uint8_t)" + t.text + ")"
+        return "((uint32_t)" + t.text + ")"
+    if t.kind == K_NAME:
+        let k = find_const(&c, t.text)
+        if k >= 0 and find_var(&c, t.text) < 0:
+            c.pos += 1
+            return c.consts[k].code
+    return ""
+
+fn pattern(c: &mut C, ty: str, x: str, b: &mut Binds) -> str:
+    # A C condition testing x (of type ty) against one pattern; bindings go into b.
+    let t = tok(&c)
+    if t.kind == K_NAME and t.text == "_":
+        c.pos += 1
+        return "1"
+    if t.kind == K_STR:
+        c.pos += 1
+        if ty != "str":
+            err_at(&c, t, "a string pattern needs a str, found " + ty)
+        return "sl_str_eq(" + x + ", " + c_lit(t.text) + ")"
+    if t.kind == K_NAME and (t.text == "true" or t.text == "false"):
+        c.pos += 1
+        return "(" + x + " == " + t.text + ")"
+    if at_op(&c, "("):
+        die(&c, "tuples are not part of Silly Core")
+    if is_scalar(ty):
+        let lo = lit_pattern(&mut c, ty)
+        if lo != "":
+            if eat_op(&mut c, "..="):
+                let hi = lit_pattern(&mut c, ty)
+                return "(" + x + " >= " + lo + " && " + x + " <= " + hi + ")"
+            if eat_op(&mut c, ".."):
+                let hi = lit_pattern(&mut c, ty)
+                return "(" + x + " >= " + lo + " && " + x + " < " + hi + ")"
+            return "(" + x + " == " + lo + ")"
+    if t.kind != K_NAME:
+        die(&c, "expected a pattern, found " + describe(t))
+    var name = t.text
+    if find_enum(&c, name) >= 0 and next_is_op(&c, "."):
+        c.pos += 2
+        name = tok(&c).text
+    if ty.starts_with("Option[") or ty.starts_with("Result[") or is_enum(&c, ty):
+        let vs = variants_of(&c, ty)
+        for k in 0..len(vs):
+            if vs[k].name == name:
+                c.pos += 1
+                let v = vs[k].clone()
+                var cond = "(" + x + ".tag == " + str(k) + ")"
+                if len(v.tys) == 0:
+                    return cond
+                expect_op(&mut c, "(")
+                for j in 0..len(v.tys):
+                    if j > 0:
+                        expect_op(&mut c, ",")
+                    let sub = pattern(&mut c, v.tys[j], x + ".u." + name + ".a" + str(j), &mut b)
+                    if sub != "1":
+                        cond += " && " + sub
+                expect_op(&mut c, ")")
+                return "(" + cond + ")"
+    if c.kws.contains(name):
+        die(&c, "expected a pattern, found '" + name + "'")
+    if at_op(&c, "(") or next_is_op(&c, "("):
+        die(&c, ty + " has no variant '" + name + "'")
+    c.pos += 1
+    b.names.push(name)
+    b.tys.push(ty)
+    b.codes.push(x)
+    return "1"
+
+fn match_stmt(c: &mut C):
+    let t = tok(&c)
+    let v = expr(&mut c, "")
+    if v.ty == "void":
+        err_at(&c, t, "cannot match on a value of type void")
+    expect_op(&mut c, ":")
+    expect_nl(&mut c)
+    if not at_kind(&c, K_INDENT):
+        die(&c, "expected `case` lines on an indented block")
+    c.pos += 1
+    let m = fresh(&mut c, "m")
+    let end = fresh(&mut c, "mend")
+    emit(&mut c, "{")
+    indent_in(&mut c)
+    emit(&mut c, ctype(v.ty) + " " + m + " = " + v.code + ";")
+    while not at_kind(&c, K_DEDENT):
+        if at_kind(&c, K_NL):
+            c.pos += 1
+            continue
+        expect_kw(&mut c, "case")
+        var b = Binds([], [], [])
+        var cond = pattern(&mut c, v.ty, m, &mut b)
+        while at_op(&c, "|"):
+            c.pos += 1
+            let n = len(b.names)
+            let alt = pattern(&mut c, v.ty, m, &mut b)
+            if len(b.names) != n or n > 0:
+                die(&c, "bindings in alternative patterns are not part of Silly Core")
+            cond = "(" + cond + " || " + alt + ")"
+        push_scope(&mut c)
+        emit(&mut c, "if (" + cond + ") {")
+        indent_in(&mut c)
+        for k in 0..len(b.names):
+            emit_type(&mut c, b.tys[k])
+            let cn = add_var(&mut c, b.names[k], b.tys[k], false, false)
+            emit(&mut c, ctype(b.tys[k]) + " " + cn + " = " + b.codes[k] + ";")
+        var guarded = false
+        if eat_kw(&mut c, "if"):
+            let g = cond_code(&mut c)
+            emit(&mut c, "if (" + g + ") {")
+            indent_in(&mut c)
+            guarded = true
+        expect_op(&mut c, ":")
+        suite(&mut c)
+        emit(&mut c, "goto " + end + ";")
+        if guarded:
+            indent_out(&mut c)
+            emit(&mut c, "}")
+        indent_out(&mut c)
+        emit(&mut c, "}")
+        pop_scope(&mut c)
+    c.pos += 1
+    emit(&mut c, end + ": ;")
+    indent_out(&mut c)
+    emit(&mut c, "}")
+
+fn statement(c: &mut C):
+    if eat_kw(&mut c, "if"):
+        if_stmt(&mut c)
+    elif eat_kw(&mut c, "while"):
+        while_stmt(&mut c)
+    elif eat_kw(&mut c, "loop"):
+        expect_op(&mut c, ":")
+        emit(&mut c, "for (;;) {")
+        loop_body(&mut c)
+        emit(&mut c, "}")
+    elif eat_kw(&mut c, "for"):
+        for_stmt(&mut c)
+    elif eat_kw(&mut c, "match"):
+        match_stmt(&mut c)
+    elif at_kw(&c, "fn"):
+        die(&c, "nested functions are not part of Silly Core")
+    elif at_kw(&c, "elif") or at_kw(&c, "else"):
+        die(&c, "`" + tok(&c).text + "` without a matching `if`")
+    else:
+        simple_stmt(&mut c)
+
+# ---- functions and the whole program ----
+
+fn compile_fn(c: &mut C, i: int) -> str:
+    let f = c.fns[i].clone()
+    c.pos = f.body
+    c.vars.clear()
+    c.scopes.clear()
+    c.cnames.clear()
+    c.out.clear()
+    c.tmp = 0
+    c.loops = 0
+    c.ret = f.ret
+    var reset = not holds_storage(&c, f.ret)
+    for p in f.params:
+        if p.mode == BY_MUT and holds_storage(&c, p.ty):
+            reset = false
+    c.reset = reset
+    c.indent = "    "
+    for p in f.params:
+        add_var(&mut c, p.name, p.ty, p.mode != BY_REF, p.mode != BY_VALUE)
+    if reset:
+        emit(&mut c, "uint8_t *_mark = ds_top;")
+    suite(&mut c)
+    if f.ret == "void" and reset:
+        emit(&mut c, "ds_top = _mark;")
+    var s = proto(&mut c, i) + " {\n"
+    for line in c.out:
+        s += line + "\n"
+    return s + "}\n"
+
+fn compile(c: &mut C) -> str:
+    declare(&mut c)
+    var protos: list[str] = []
+    for i in 0..len(c.fns):
+        protos.push(proto(&mut c, i) + ";")
+    var bodies: list[str] = []
+    for i in 0..len(c.fns):
+        bodies.push(compile_fn(&mut c, i))
+    var s = "/* Generated by sillyc from " + c.file + "; do not edit. */\n#include \"sillyc_rt.h\"\n\n"
+    for x in c.fwd:
+        s += x + "\n"
+    for x in c.defs:
+        s += x + "\n"
+    for x in c.helpers:
+        s += x + "\n"
+    s += "\n"
+    for x in protos:
+        s += x + "\n"
+    s += "\n"
+    for x in bodies:
+        s += x + "\n"
+    var call = "f_main(); sl_exit(0);"
+    if c.fns[find_fn(&c, "main")].ret == "int":
+        call = "sl_exit((int)f_main());"
+    s += "int main(int argc, char **argv) { sl_init(argc, argv); " + call + " return 0; }\n"
+    return s
+
+fn main():
+    let a = args()
+    if len(a) != 3:
+        eprint("usage: sillyc input.silly output.c")
+        exit(2)
+    let path = a[1]
+    var src = ""
+    match read_file(path):
+        case Ok(s):
+            src = s
+        case Err(e):
+            eprint("sillyc: cannot read " + path + ": " + e)
+            exit(1)
+    let toks = lex(path, src)
+    var c = C(path, src.split("\n"), toks, 0, [], [], [], [], [], [], [], KEYWORDS.split(), [], [], [], [], [], [], 0, 0, false, "void", false, 0, "")
+    let out = compile(&mut c)
+    if not write_file(a[2], out):
+        eprint("sillyc: cannot write " + a[2])
+        exit(1)

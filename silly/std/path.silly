@@ -1,0 +1,165 @@
+# Path manipulation on strings, like Python's os.path. Nothing here touches the disk
+# except abspath and expanduser, which ask the os module for the cwd and $HOME.
+#
+#     import path
+#     path.join("src", "main.silly")      # "src/main.silly"
+#     path.splitext("a/b.tar.gz")         # ("a/b.tar", ".gz")
+#     path.normalize("a/./b/../c")        # "a/c"
+
+import os
+
+fn _rfind(s: &str, c: u8) -> int:
+    let b = s.bytes()
+    var i = len(b) - 1
+    while i >= 0:
+        if b[i] == c:
+            return i
+        i -= 1
+    return -1
+
+# Joins two paths; an absolute second part replaces the first.
+fn join(a: str, b: str) -> str:
+    if b.starts_with("/") or a == "":
+        return b
+    if a.ends_with("/"):
+        return a + b
+    return a + "/" + b
+
+# Joins any number of parts.
+fn join_all(parts: &list[str]) -> str:
+    var out = ""
+    for p in parts:
+        out = join(out, p.clone())
+    return out
+
+# Whether p starts at the root.
+fn is_abs(p: &str) -> bool:
+    return p.starts_with("/")
+
+# (head, tail): everything before the last "/" and the final component.
+fn split(p: &str) -> (str, str):
+    let i = _rfind(p, '/' as u8)
+    if i < 0:
+        return ("", p.clone())
+    # trailing slashes go, unless the head is all slashes ("/")
+    let b = p.bytes()
+    var j = i
+    while j > 0 and b[j - 1] == ('/' as u8):
+        j -= 1
+    if j == 0:
+        return (p[0:i + 1], p[i + 1:len(p)])
+    return (p[0:j], p[i + 1:len(p)])
+
+# The final component: basename("a/b.txt") == "b.txt", basename("a/") == "".
+fn basename(p: &str) -> str:
+    let i = _rfind(p, '/' as u8)
+    return p[i + 1:len(p)]
+
+# Everything but the final component: dirname("a/b.txt") == "a".
+fn dirname(p: &str) -> str:
+    let (h, _) = split(p)
+    return h
+
+# (root, ext) with ext starting at the last "." of the final component.
+# A leading dot is not an extension: splitext(".bashrc") == (".bashrc", "").
+fn splitext(p: &str) -> (str, str):
+    let slash = _rfind(p, '/' as u8)
+    let dot = _rfind(p, '.' as u8)
+    if dot <= slash + 1:
+        return (p.clone(), "")
+    # all dots before it in the name (like "..x") still mean no extension
+    var j = slash + 1
+    let b = p.bytes()
+    while j < dot and b[j] == ('.' as u8):
+        j += 1
+    if j == dot:
+        return (p.clone(), "")
+    return (p[0:dot], p[dot:len(p)])
+
+# The extension including its dot, or "".
+fn ext(p: &str) -> str:
+    let (_, e) = splitext(p)
+    return e
+
+# The final component without its extension.
+fn stem(p: &str) -> str:
+    let (r, _) = splitext(&basename(p))
+    return r
+
+# Replaces the extension: with_ext("a/b.c", ".txt") == "a/b.txt".
+fn with_ext(p: &str, e: &str) -> str:
+    let (r, _) = splitext(p)
+    return r + e
+
+# The components between slashes, with a leading "/" kept for absolute paths.
+fn parts(p: &str) -> list[str]:
+    var out: list[str] = []
+    if p.starts_with("/"):
+        out.push("/")
+    for c in p.split("/"):
+        if c != "":
+            out.push(c.clone())
+    return out
+
+# Removes "." components, doubled slashes and "x/.." pairs, without looking at the disk.
+fn normalize(p: &str) -> str:
+    if p == "":
+        return "."
+    let abs = p.starts_with("/")
+    var stack: list[str] = []
+    for c in p.split("/"):
+        if c == "" or c == ".":
+            continue
+        if c == "..":
+            if len(stack) > 0 and stack[len(stack) - 1] != "..":
+                stack.pop()
+            elif not abs:
+                stack.push("..")
+            continue
+        stack.push(c.clone())
+    let body = "/".join(stack)
+    if abs:
+        return "/" + body
+    if body == "":
+        return "."
+    return body
+
+# An absolute, normalized form of the path, based on the current directory.
+fn abspath(p: &str) -> str:
+    if p.starts_with("/"):
+        return normalize(p)
+    return normalize(&join(os.getcwd(), p.clone()))
+
+# The path of `p` relative to `base` (both made absolute first).
+fn relpath(p: &str, base: &str) -> str:
+    let a = parts(&abspath(p))
+    let b = parts(&abspath(base))
+    var i = 0
+    while i < len(a) and i < len(b) and a[i] == b[i]:
+        i += 1
+    var out: list[str] = []
+    for _ in i..len(b):
+        out.push("..")
+    for j in i..len(a):
+        out.push(a[j].clone())
+    if out.is_empty():
+        return "."
+    return "/".join(out)
+
+# Replaces a leading "~" with $HOME.
+fn expanduser(p: &str) -> str:
+    if p == "~" or p.starts_with("~/"):
+        return os.getenv_or("HOME", "~") + p[1:len(p)]
+    return p.clone()
+
+# Whether p exists.
+fn exists(p: str) -> bool:
+    return os.exists(p)
+
+# Whether p is a regular file.
+fn is_file(p: str) -> bool:
+    return os.is_file(p)
+
+# Whether p is a directory.
+fn is_dir(p: str) -> bool:
+    return os.is_dir(p)

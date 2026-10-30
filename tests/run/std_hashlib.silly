@@ -1,0 +1,51 @@
+# hashlib digests, hmac, crc32 against known vectors
+
+import hashlib
+
+fn main():
+    print(hashlib.md5(""))
+    print(hashlib.md5("The quick brown fox jumps over the lazy dog"))
+    print(hashlib.sha1("abc"))
+    print(hashlib.sha256("abc"))
+    print(hashlib.sha256(""))
+    print(hashlib.sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))
+    print(hashlib.sha512("abc"))
+    print(hashlib.hmac_sha256("key", "The quick brown fox jumps over the lazy dog"))
+    print(hashlib.hmac_md5("key", "The quick brown fox jumps over the lazy dog"))
+    print(hashlib.hmac_sha1("key", "The quick brown fox jumps over the lazy dog"))
+    print(hashlib.crc32("hello"))
+    print(hashlib.crc32("The quick brown fox jumps over the lazy dog"))
+    var long = ""
+    for _ in 0..1000:
+        long += "a"
+    print(hashlib.sha256(&long))
+    print(hashlib.sha512(&long))
+    let raw = hashlib.sha256_bytes("abc")
+    print(len(raw), hashlib.hex(&raw))
+    let bs: list[u8] = [0, 255, 128, 65]
+    let s = hashlib.from_bytes(&bs)
+    print(len(s), s.bytes())
+    print(hashlib.equal("abc", "abc"), hashlib.equal("abc", "abd"), hashlib.equal("a", "ab"))
+    var k = ""
+    for _ in 0..200:
+        k += "k"
+    print(hashlib.hmac_sha256(&k, "m"), hashlib.hmac_sha512(&k, "m").len())
+
+#> d41d8cd98f00b204e9800998ecf8427e
+#> 9e107d9d372bb6826bd81d3542a419d6
+#> a9993e364706816aba3e25717850c26c9cd0d89d
+#> ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+#> e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+#> 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+#> ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f
+#> f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8
+#> 80070713463e7749b90c2dc24911e275
+#> de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9
+#> 907060870
+#> 1095738169
+#> 41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3
+#> 67ba5535a46e3f86dbfbed8cbbaf0125c76ed549ff8b0b9e03e0c88cf90fa634fa7b12b47d77b694de488ace8d9a65967dc96df599727d3292a8d9d447709c97
+#> 32 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+#> 4 [0, 255, 128, 65]
+#> true false false
+#> 386081d3a1ad30125daa8d66db6df4ea73d39212c64794e2d02abe994806017c 128

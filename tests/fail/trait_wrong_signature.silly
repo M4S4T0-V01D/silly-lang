@@ -1,0 +1,10 @@
+# error: but the trait declares str
+trait Show:
+    fn show(self) -> str
+struct P:
+    x: int
+impl Show for P:
+    fn show(self) -> int:
+        return 1
+fn main():
+    return

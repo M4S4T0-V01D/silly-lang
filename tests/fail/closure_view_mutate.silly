@@ -1,0 +1,4 @@
+# error: cannot modify 's': it is a borrowed view
+fn main():
+    let w = [[1]]
+    w.each(fn(s) => s.push(1))

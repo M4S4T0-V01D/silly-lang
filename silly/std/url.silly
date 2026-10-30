@@ -1,0 +1,287 @@
+# URLs: splitting, joining, percent-encoding and query strings, like Python's
+# urllib.parse.
+#
+#     import url
+#     fn main():
+#         let u = url.parse(&"https://user@example.com:8080/a/b?q=1&x=two#top")
+#         print(u.scheme, u.host(), u.port(), u.path, u.query)   # https example.com 8080 /a/b q=1&x=two
+#         print(url.quote(&"a b/c"))                            # a%20b/c
+#         print(url.urlencode(&[("q", "silly lang"), ("n", "1")]))  # q=silly+lang&n=1
+#         print(url.urljoin(&"http://a/b/c/d", &"../g"))        # http://a/b/g
+
+import hashlib
+
+# A URL split into its parts (see parse()).
+struct URL:
+    scheme: str
+    netloc: str                     # "user:pw@host:port"
+    path: str
+    query: str                      # without the "?"
+    fragment: str                   # without the "#"
+
+    # The URL as text again.
+    fn str(self) -> str:
+        return unsplit(&self.scheme, &self.netloc, &self.path, &self.query, &self.fragment)
+
+    # The host part of netloc, lowercased, without brackets around IPv6 addresses.
+    fn host(self) -> str:
+        var h = self._hostport()
+        if h.starts_with("["):
+            let end = h.find("]")
+            return h[1:end.unwrap_or(len(h))].lower()
+        let c = h.find(":")
+        if c.is_some():
+            h = h[0:c.unwrap()]
+        return h.lower()
+
+    # The port, or -1 if there is none (or it isn't a number).
+    fn port(self) -> int:
+        let h = self._hostport()
+        var at = 0
+        if h.starts_with("["):
+            at = h.find("]").unwrap_or(len(h))
+        let c = h[at:].find(":")
+        if c.is_none():
+            return -1
+        return h[at + c.unwrap() + 1:].parse_int().unwrap_or(-1)
+
+    # The user name before "@", or "".
+    fn username(self) -> str:
+        let ui = self._userinfo()
+        let c = ui.find(":")
+        return ui[0:c.unwrap()] if c.is_some() else ui
+
+    # The password after "user:", or "".
+    fn password(self) -> str:
+        let ui = self._userinfo()
+        let c = ui.find(":")
+        return ui[c.unwrap() + 1:] if c.is_some() else ""
+
+    # The query's (key, value) pairs, decoded.
+    fn params(self) -> list[(str, str)]:
+        return parse_qsl(&self.query)
+
+    fn _userinfo(self) -> str:
+        let at = _rfind(&self.netloc, &"@")
+        return self.netloc[0:at] if at >= 0 else ""
+
+    fn _hostport(self) -> str:
+        let at = _rfind(&self.netloc, &"@")
+        return self.netloc[at + 1:] if at >= 0 else self.netloc.clone()
+
+fn _rfind(s: &str, sub: &str) -> int:
+    var last = -1
+    var from_ = 0
+    while true:
+        let f = s[from_:].find(sub.clone())
+        if f.is_none():
+            return last
+        last = from_ + f.unwrap()
+        from_ = last + 1
+    return last
+
+fn _scheme_char(c: char, first: bool) -> bool:
+    if c.is_alpha():
+        return true
+    return not first and (c.is_digit() or c == '+' or c == '-' or c == '.')
+
+# Splits a URL into its five parts (urlsplit). Nothing is decoded.
+fn parse(s: &str) -> URL:
+    var rest = s.trim()
+    var scheme = ""
+    let colon = rest.find(":")
+    if colon.is_some() and colon.unwrap() > 0:
+        let cs = rest[0:colon.unwrap()].chars()
+        var good = true
+        for i in 0..len(cs):
+            if not _scheme_char(cs[i], i == 0):
+                good = false
+        if good:
+            scheme = rest[0:colon.unwrap()].lower()
+            rest = rest[colon.unwrap() + 1:]
+    var fragment = ""
+    let hash = rest.find("#")
+    if hash.is_some():
+        fragment = rest[hash.unwrap() + 1:]
+        rest = rest[0:hash.unwrap()]
+    var query = ""
+    let q = rest.find("?")
+    if q.is_some():
+        query = rest[q.unwrap() + 1:]
+        rest = rest[0:q.unwrap()]
+    var netloc = ""
+    if rest.starts_with("//"):
+        rest = rest[2:]
+        let slash = rest.find("/")
+        if slash.is_some():
+            netloc = rest[0:slash.unwrap()]
+            rest = rest[slash.unwrap():]
+        else:
+            netloc = rest
+            rest = ""
+    return URL(scheme, netloc, rest, query, fragment)
+
+# Puts the five parts back together (urlunsplit).
+fn unsplit(scheme: &str, netloc: &str, path: &str, query: &str, fragment: &str) -> str:
+    var out = ""
+    if scheme != "":
+        out += scheme + ":"
+    if netloc != "" or (scheme != "" and path.starts_with("//")) or scheme == "file":
+        out += "//" + netloc
+        if path != "" and not path.starts_with("/"):
+            out += "/"
+    out += path
+    if query != "":
+        out += "?" + query
+    if fragment != "":
+        out += "#" + fragment
+    return out
+
+# ---- percent-encoding ----
+
+const _UNRESERVED: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-~"
+const _HEX: str = "0123456789ABCDEF"
+
+fn _quote(s: &str, safe: &str, plus: bool) -> str:
+    var out = ""
+    for b in s.bytes():
+        let c = str(chr(b as int))
+        if (b as int) < 128 and (_UNRESERVED.contains(c.clone()) or safe.contains(c.clone())):
+            out += c
+        elif plus and b as int == 32:
+            out += "+"
+        else:
+            let v = b as int
+            out += "%" + _HEX[v / 16:v / 16 + 1] + _HEX[v % 16:v % 16 + 1]
+    return out
+
+# Percent-encodes everything except letters, digits, "_.-~" and "/".
+fn quote(s: &str) -> str:
+    return _quote(s, &"/", false)
+
+# Percent-encodes everything except letters, digits, "_.-~" and the chars in safe.
+fn quote_safe(s: &str, safe: &str) -> str:
+    return _quote(s, safe, false)
+
+# Like quote with nothing else safe, and spaces as "+" (for query strings and forms).
+fn quote_plus(s: &str) -> str:
+    return _quote(s, &"", true)
+
+fn _hexval(b: int) -> int:
+    if b >= 48 and b <= 57:
+        return b - 48
+    if b >= 65 and b <= 70:
+        return b - 55
+    if b >= 97 and b <= 102:
+        return b - 87
+    return -1
+
+fn _unquote(s: &str, plus: bool) -> str:
+    let bs = s.bytes()
+    var out: list[u8] = []
+    var i = 0
+    while i < len(bs):
+        let b = bs[i] as int
+        if b == 37 and i + 2 < len(bs) and _hexval(bs[i + 1] as int) >= 0 and _hexval(bs[i + 2] as int) >= 0:
+            out.push((_hexval(bs[i + 1] as int) * 16 + _hexval(bs[i + 2] as int)) as u8)
+            i += 3
+        elif plus and b == 43:
+            out.push(32 as u8)
+            i += 1
+        else:
+            out.push(bs[i])
+            i += 1
+    return hashlib.from_bytes(&out)
+
+# Decodes %XX escapes.
+fn unquote(s: &str) -> str:
+    return _unquote(s, false)
+
+# Decodes %XX escapes and "+" as a space.
+fn unquote_plus(s: &str) -> str:
+    return _unquote(s, true)
+
+# ---- query strings ----
+
+# "a=1&b=x+y" as decoded pairs, in order. Empty parts are skipped; a part
+# without "=" has an empty value.
+fn parse_qsl(q: &str) -> list[(str, str)]:
+    var out: list[(str, str)] = []
+    for part in q.split("&"):
+        if part == "":
+            continue
+        let eq = part.find("=")
+        if eq.is_some():
+            out.push((unquote_plus(&part[0:eq.unwrap()]), unquote_plus(&part[eq.unwrap() + 1:])))
+        else:
+            out.push((unquote_plus(&part), ""))
+    return out
+
+# The values for each key, in order.
+fn parse_qs(q: &str) -> map[str, list[str]]:
+    var out: map[str, list[str]] = {}
+    for (k, v) in parse_qsl(q):
+        if not out.contains(k.clone()):
+            out[k.clone()] = []
+        out[k].push(v)
+    return out
+
+# Pairs as a query string, with quote_plus.
+fn urlencode(pairs: &list[(str, str)]) -> str:
+    var parts: list[str] = []
+    for (k, v) in pairs:
+        parts.push(quote_plus(&k) + "=" + quote_plus(&v))
+    return "&".join(parts)
+
+# ---- joining ----
+
+# Resolves "." and ".." in a path (RFC 3986 remove_dot_segments).
+fn _remove_dots(p: &str) -> str:
+    if p == "":
+        return ""
+    let segs = p.split("/")
+    var out: list[str] = []
+    for i in 0..len(segs):
+        let s = segs[i].clone()
+        let last = i == len(segs) - 1
+        if s == "..":
+            if len(out) > 1:
+                out.pop()
+            if last:
+                out.push("")
+        elif s == ".":
+            if last:
+                out.push("")
+        else:
+            out.push(s)
+    var r = "/".join(out)
+    if p.starts_with("/") and not r.starts_with("/"):
+        r = "/" + r
+    return r
+
+# A reference resolved against a base URL, as a browser would (RFC 3986).
+fn urljoin(base: &str, ref: &str) -> str:
+    if base == "":
+        return ref.clone()
+    if ref == "":
+        return base.clone()
+    let b = parse(base)
+    let r = parse(ref)
+    if r.scheme != "" and r.scheme != b.scheme:
+        return ref.clone()
+    let scheme = b.scheme.clone()
+    if r.netloc != "" or ref.starts_with("//"):
+        return unsplit(&scheme, &r.netloc, &_remove_dots(&r.path), &r.query, &r.fragment)
+    if r.path == "":
+        let q = r.query if r.query != "" else b.query.clone()
+        return unsplit(&scheme, &b.netloc, &b.path, &q, &r.fragment)
+    if r.path.starts_with("/"):
+        return unsplit(&scheme, &b.netloc, &_remove_dots(&r.path), &r.query, &r.fragment)
+    # Relative path: replace the base path's last segment.
+    var merged = ""
+    if b.netloc != "" and b.path == "":
+        merged = "/" + r.path
+    else:
+        let slash = _rfind(&b.path, &"/")
+        merged = (b.path[0:slash + 1] if slash >= 0 else "") + r.path
+    return unsplit(&scheme, &b.netloc, &_remove_dots(&merged), &r.query, &r.fragment)

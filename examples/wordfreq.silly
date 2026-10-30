@@ -1,0 +1,36 @@
+# Count words in a file (or a built-in text) and print the most common ones.
+#
+#   silly run examples/wordfreq.silly [file]
+
+fn normalize(w: str) -> str:
+    var out = ""
+    for c in w.lower():
+        if c.is_alpha() or c == '\'':
+            out += str(c)
+    return out
+
+fn count(text: str) -> map[str, int]:
+    var m: map[str, int] = {}
+    for line in text.split("\n"):
+        for raw in line.split(" "):
+            let w = normalize(raw)
+            if not w.is_empty():
+                m[w] = m.get_or(w, 0) + 1
+    return m
+
+fn main():
+    let a = args()
+    var text = "It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness"
+    if len(a) > 1:
+        text = read_file(a[1]).expect("cannot read the file")
+    let counts = count(text)
+    # sort by count descending, then word ascending: sort (-count, word) pairs
+    var keyed: list[(int, str)] = []
+    for w, n in counts.items():
+        keyed.push((-n, w))
+    keyed.sort()
+    print(f"{len(counts)} distinct words")
+    for i, (n, w) in enumerate(keyed):
+        if i == 10:
+            break
+        print(f"{-n:>5}  {w}")

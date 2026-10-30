@@ -1,0 +1,221 @@
+# Leveled log messages, like Python's logging.
+#
+#     import logging
+#     fn main():
+#         logging.warning("disk almost full")          # WARNING:root:disk almost full
+#         var log = logging.get_logger("app")
+#         log.set_level(logging.DEBUG)
+#         log.set_format("%(asctime)s %(levelname)-8s %(name)s: %(message)s")
+#         log.to_file("app.log")                       # also append to a file
+#         log.info("started")
+#
+# Messages below a logger's level are dropped. New loggers start at WARNING, or
+# at the level named in $SILLY_LOG (e.g. SILLY_LOG=debug), which also sets the
+# level of the module-level functions. Output goes to stderr unless to_stderr(false).
+#
+# Format fields: %(message)s %(levelname)s %(levelno)d %(name)s %(asctime)s
+# %(created)f %(process)d, with an optional width like %(levelname)-8s or %(levelname)8s.
+
+import datetime
+import os
+import sys
+import time
+
+const NOTSET: int = 0
+const DEBUG: int = 10
+const INFO: int = 20
+const WARNING: int = 30
+const ERROR: int = 40
+const CRITICAL: int = 50
+
+const DEFAULT_FORMAT: str = "%(levelname)s:%(name)s:%(message)s"
+
+# "DEBUG", "INFO", ...; other numbers give "Level N".
+fn level_name(level: int) -> str:
+    if level == DEBUG:
+        return "DEBUG"
+    if level == INFO:
+        return "INFO"
+    if level == WARNING:
+        return "WARNING"
+    if level == ERROR:
+        return "ERROR"
+    if level == CRITICAL:
+        return "CRITICAL"
+    if level == NOTSET:
+        return "NOTSET"
+    return "Level " + str(level)
+
+# A level from its name (any case, "warn" and "fatal" too) or a number.
+fn parse_level(s: &str) -> Option[int]:
+    let u = s.trim().upper()
+    if u == "DEBUG":
+        return Some(DEBUG)
+    if u == "INFO":
+        return Some(INFO)
+    if u == "WARNING" or u == "WARN":
+        return Some(WARNING)
+    if u == "ERROR":
+        return Some(ERROR)
+    if u == "CRITICAL" or u == "FATAL":
+        return Some(CRITICAL)
+    if u == "NOTSET":
+        return Some(NOTSET)
+    return u.parse_int()
+
+fn _env_level() -> int:
+    match os.getenv("SILLY_LOG"):
+        case Some(v): return parse_level(&v).unwrap_or(WARNING)
+        case None: return WARNING
+
+# A named logger with its own level, format and output.
+struct Logger:
+    name: str
+    level: int
+    format: str
+    stderr: bool
+    files: list[str]
+
+    fn set_level(mut self, level: int):
+        self.level = level
+
+    fn set_format(mut self, fmt: str):
+        self.format = fmt
+
+    # Also append each message to a file.
+    fn to_file(mut self, path: str):
+        self.files.push(path)
+
+    fn to_stderr(mut self, on: bool):
+        self.stderr = on
+
+    # Whether a message at this level would be written.
+    fn enabled(self, level: int) -> bool:
+        return level >= self.level and level > NOTSET
+
+    # A logger named "<name>.<suffix>" with these settings.
+    fn child(self, suffix: str) -> Logger:
+        var c = self.clone()
+        c.name = self.name + "." + suffix
+        return c
+
+    # The line a message would be written as (without the newline).
+    fn render(self, level: int, msg: &str) -> str:
+        return format_record(&self.format, &self.name, level, msg)
+
+    fn log(self, level: int, msg: str):
+        if not self.enabled(level):
+            return
+        let line = self.render(level, &msg) + "\n"
+        if self.stderr:
+            sys.stderr(line)
+        for f in self.files:
+            match os.append(f.clone(), line.clone()):
+                case Ok(_): pass
+                case Err(e): sys.stderr("logging: cannot write " + f + ": " + e + "\n")
+
+    fn debug(self, msg: str):
+        self.log(DEBUG, msg)
+
+    fn info(self, msg: str):
+        self.log(INFO, msg)
+
+    fn warning(self, msg: str):
+        self.log(WARNING, msg)
+
+    fn error(self, msg: str):
+        self.log(ERROR, msg)
+
+    fn critical(self, msg: str):
+        self.log(CRITICAL, msg)
+
+# A new Logger called name, at the level SILLY_LOG names (WARNING if unset).
+fn get_logger(name: str) -> Logger:
+    return Logger(name, _env_level(), DEFAULT_FORMAT, true, [])
+
+# Fills in a format string's %(field)s placeholders.
+fn format_record(fmt: &str, name: &str, level: int, msg: &str) -> str:
+    var out = ""
+    var i = 0
+    let n = len(fmt)
+    while i < n:
+        if fmt[i:i + 2] == "%%":
+            out += "%"
+            i += 2
+            continue
+        if fmt[i:i + 2] != "%(":
+            # Copy up to the next '%' in one piece.
+            var j = i + 1
+            while j < n and fmt[j:j + 1] != "%":
+                j += 1
+            out += fmt[i:j]
+            i = j
+            continue
+        let close = fmt[i:].find(")")
+        if close.is_none():
+            out += fmt[i:]
+            break
+        let key = fmt[i + 2:i + close.unwrap()]
+        var j = i + close.unwrap() + 1
+        # An optional width (-8 pads on the right), then the type letter.
+        var spec = ""
+        while j < n and "-0123456789.".contains(fmt[j:j + 1]):
+            spec += fmt[j:j + 1]
+            j += 1
+        if j < n:
+            j += 1
+        i = j
+        var v = ""
+        if key == "message":
+            v = msg.clone()
+        elif key == "levelname":
+            v = level_name(level)
+        elif key == "levelno":
+            v = str(level)
+        elif key == "name":
+            v = name.clone()
+        elif key == "asctime":
+            let t = datetime.now()
+            v = t.strftime(&"%Y-%m-%d %H:%M:%S") + "," + str(t.microsecond / 1000 + 1000)[1:]
+        elif key == "created":
+            v = str(time.time())
+        elif key == "process":
+            v = str(os.getpid())
+        else:
+            v = "%(" + key + ")"
+        let left = spec.starts_with("-")
+        let w = (spec[1:] if left else spec).parse_int().unwrap_or(0)
+        while len(v) < w:
+            v = (v + " ") if left else (" " + v)
+        out += v
+    return out
+
+# ---- the root logger ----
+
+# A Logger called "root"; log(), debug() and the rest use one like it.
+fn root() -> Logger:
+    return get_logger("root")
+
+# Logs msg at level to the root logger.
+fn log(level: int, msg: str):
+    root().log(level, msg)
+
+# Logs msg at DEBUG.
+fn debug(msg: str):
+    root().log(DEBUG, msg)
+
+# Logs msg at INFO.
+fn info(msg: str):
+    root().log(INFO, msg)
+
+# Logs msg at WARNING.
+fn warning(msg: str):
+    root().log(WARNING, msg)
+
+# Logs msg at ERROR.
+fn error(msg: str):
+    root().log(ERROR, msg)
+
+# Logs msg at CRITICAL.
+fn critical(msg: str):
+    root().log(CRITICAL, msg)

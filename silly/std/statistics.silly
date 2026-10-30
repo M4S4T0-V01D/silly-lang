@@ -1,0 +1,178 @@
+# Averages and spread of lists of numbers, like Python's statistics.
+#
+#     import statistics as st
+#     fn main():
+#         let xs = [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]
+#         print(st.mean(&xs), st.median(&xs), st.pstdev(&xs))   # 5.0 4.5 2.0
+#         print(st.mode(&st.floats(&[1, 2, 2, 3])))              # 2.0
+#
+# Every function takes list[f64]; floats() converts a list[int]. Functions that
+# need data panic on an empty list (variance and stdev need two items).
+
+import math
+
+# A list[int] as list[f64].
+fn floats(xs: &list[int]) -> list[f64]:
+    var out: list[f64] = []
+    for x in xs:
+        out.push(x as f64)
+    return out
+
+fn _need(xs: &list[f64], n: int, what: str):
+    if len(xs) < n:
+        panic("statistics." + what + " needs at least " + str(n) + " data point" + ("" if n == 1 else "s"))
+
+# The sum, added with compensation (Neumaier) so rounding errors don't pile up.
+fn fsum(xs: &list[f64]) -> f64:
+    var s = 0.0
+    var c = 0.0
+    for x in xs:
+        let t = s + x
+        if s.abs() >= x.abs():
+            c += (s - t) + x
+        else:
+            c += (x - t) + s
+        s = t
+    return s + c
+
+# The arithmetic mean; panics on an empty list.
+fn mean(xs: &list[f64]) -> f64:
+    _need(xs, 1, "mean")
+    return fsum(xs) / len(xs) as f64
+
+# The nth root of the product (all values must be positive).
+fn geometric_mean(xs: &list[f64]) -> f64:
+    _need(xs, 1, "geometric_mean")
+    var logs: list[f64] = []
+    for x in xs:
+        if x <= 0.0:
+            panic("statistics.geometric_mean needs positive data")
+        logs.push(math.log(x))
+    return math.exp(fsum(&logs) / len(xs) as f64)
+
+# n divided by the sum of reciprocals.
+fn harmonic_mean(xs: &list[f64]) -> f64:
+    _need(xs, 1, "harmonic_mean")
+    var inv: list[f64] = []
+    for x in xs:
+        if x < 0.0:
+            panic("statistics.harmonic_mean needs non-negative data")
+        if x == 0.0:
+            return 0.0
+        inv.push(1.0 / x)
+    return len(xs) as f64 / fsum(&inv)
+
+fn _sorted(xs: &list[f64]) -> list[f64]:
+    var s = xs.clone()
+    s.sort()
+    return s
+
+# The middle value, or the mean of the two middle values.
+fn median(xs: &list[f64]) -> f64:
+    _need(xs, 1, "median")
+    let s = _sorted(xs)
+    let n = len(s)
+    if n % 2 == 1:
+        return s[n / 2]
+    return (s[n / 2 - 1] + s[n / 2]) / 2.0
+
+# The median; the lower middle value for even lengths.
+fn median_low(xs: &list[f64]) -> f64:
+    _need(xs, 1, "median_low")
+    let s = _sorted(xs)
+    let n = len(s)
+    return s[n / 2] if n % 2 == 1 else s[n / 2 - 1]
+
+# The median; the higher middle value for even lengths.
+fn median_high(xs: &list[f64]) -> f64:
+    _need(xs, 1, "median_high")
+    let s = _sorted(xs)
+    return s[len(s) / 2]
+
+# The most common value; the first one seen wins a tie.
+fn mode(xs: &list[f64]) -> f64:
+    _need(xs, 1, "mode")
+    let m = multimode(xs)
+    return m[0]
+
+# Every value that is most common, in the order first seen.
+fn multimode(xs: &list[f64]) -> list[f64]:
+    var seen: list[f64] = []
+    var counts: list[int] = []
+    for x in xs:
+        match seen.index_of(x):
+            case Some(i): counts[i] += 1
+            case None:
+                seen.push(x)
+                counts.push(1)
+    var best = 0
+    for c in counts:
+        best = max(best, c)
+    var out: list[f64] = []
+    for i in 0..len(seen):
+        if counts[i] == best:
+            out.push(seen[i])
+    return out
+
+fn _ss(xs: &list[f64]) -> f64:
+    let m = mean(xs)
+    var d: list[f64] = []
+    for x in xs:
+        d.push((x - m) * (x - m))
+    return fsum(&d)
+
+# Population variance: the mean squared distance from the mean.
+fn pvariance(xs: &list[f64]) -> f64:
+    _need(xs, 1, "pvariance")
+    return _ss(xs) / len(xs) as f64
+
+# Sample variance, dividing by n - 1.
+fn variance(xs: &list[f64]) -> f64:
+    _need(xs, 2, "variance")
+    return _ss(xs) / (len(xs) - 1) as f64
+
+# The population standard deviation.
+fn pstdev(xs: &list[f64]) -> f64:
+    return pvariance(xs).sqrt()
+
+# The sample standard deviation (needs at least two values).
+fn stdev(xs: &list[f64]) -> f64:
+    return variance(xs).sqrt()
+
+# Cut points dividing the data into n groups of equal probability
+# (Python's default "exclusive" method): quantiles(xs, 4) gives the quartiles.
+fn quantiles(xs: &list[f64], n: int) -> list[f64]:
+    _need(xs, 2, "quantiles")
+    let s = _sorted(xs)
+    let m = len(s)
+    var out: list[f64] = []
+    for i in 1..n:
+        var j = i * (m + 1) / n
+        if j < 1:
+            j = 1
+        if j > m - 1:
+            j = m - 1
+        let delta = i * (m + 1) - j * n
+        out.push((s[j - 1] * (n - delta) as f64 + s[j] * delta as f64) / n as f64)
+    return out
+
+# The covariance of two equally long samples.
+fn covariance(xs: &list[f64], ys: &list[f64]) -> f64:
+    if len(xs) != len(ys):
+        panic("statistics.covariance needs lists of the same length")
+    _need(xs, 2, "covariance")
+    let mx = mean(xs)
+    let my = mean(ys)
+    var d: list[f64] = []
+    for i in 0..len(xs):
+        d.push((xs[i] - mx) * (ys[i] - my))
+    return fsum(&d) / (len(xs) - 1) as f64
+
+# Pearson's correlation coefficient, from -1 to 1.
+fn correlation(xs: &list[f64], ys: &list[f64]) -> f64:
+    return covariance(xs, ys) / (stdev(xs) * stdev(ys))
+
+# The least-squares line through the points: (slope, intercept).
+fn linear_regression(xs: &list[f64], ys: &list[f64]) -> (f64, f64):
+    let slope = covariance(xs, ys) / variance(xs)
+    return (slope, mean(ys) - slope * mean(xs))

@@ -1,0 +1,50 @@
+# Conway's Game of Life on a fixed-size torus, packed one row per u64.
+# Low-level Silly: fixed arrays, unsigned integers and bit operations.
+
+const W = 64
+const H = 16
+
+fn step(g: &[u64; 16]) -> [u64; 16]:
+    var out: [u64; 16] = [0; 16]
+    for y in 0..H:
+        let up = g[(y + H - 1) % H]
+        let mid = g[y]
+        let down = g[(y + 1) % H]
+        var row: u64 = 0
+        for x in 0..W:
+            let l = (x + W - 1) % W
+            let r = (x + 1) % W
+            var n = 0
+            for word in [up, mid, down]:
+                n += ((word >> l) & 1) as int + ((word >> r) & 1) as int
+            n += ((up >> x) & 1) as int + ((down >> x) & 1) as int
+            let alive = (mid >> x) & 1 == 1
+            if n == 3 or (alive and n == 2):
+                row |= (1 as u64) << x
+        out[y] = row
+    return out
+
+fn show(g: &[u64; 16]):
+    for row in g:
+        var line = ""
+        for x in 0..W:
+            line += "#" if (row >> x) & 1 == 1 else "."
+        print(line)
+
+fn main():
+    var g: [u64; 16] = [0; 16]
+    # a glider and a blinker
+    g[1] = 0b010
+    g[2] = 0b100
+    g[3] = 0b111
+    g[8] = (0b111 as u64) << 30
+    for gen in 0..24:
+        g = step(&g)
+    show(&g)
+    var pop = 0
+    for row in g:
+        var r = row
+        while r != 0:
+            r &= r - 1
+            pop += 1
+    print(f"population after 24 generations: {pop}")

@@ -1,0 +1,108 @@
+# Values created inside loops and calls that outlive the iteration or call.
+
+struct Rec:
+    name: str
+    tags: list[str]
+    score: int
+
+fn make(n: int) -> list[int]:
+    var out: list[int] = []
+    for i in 0..n:
+        out.push(i)
+    return out
+
+fn label(i: int) -> str:
+    return f"n{i}"
+
+fn add_tag(r: &mut Rec, t: str):
+    r.tags.push(t)
+
+fn build(n: int) -> Rec:
+    var r = Rec("start", [], 0)
+    for i in 0..n:
+        add_tag(&mut r, label(i))
+        r.score += i
+        if i == n - 1:
+            r.name = label(i * 100)
+    return r
+
+fn find_long(words: &list[str]) -> Option[str]:
+    for w in words:
+        let up = w.upper()
+        if len(up) > 3:
+            return Some(up)
+    return None
+
+fn parse_all(xs: &list[str]) -> Result[list[int], str]:
+    var out: list[int] = []
+    for x in xs:
+        let v = x.parse_int().ok_or(f"bad: {x}")?
+        out.push(v)
+    return Ok(out)
+
+fn main():
+    # reassigning an outer variable from inside a loop
+    var last: list[int] = []
+    for i in 1..6:
+        let scratch = make(i * 10)
+        last = make(i)
+    print(last)
+
+    var best = ""
+    for i in 0..50:
+        let s = label(i)
+        if len(s) >= len(best):
+            best = s
+    print(best)
+
+    var opt: Option[list[int]] = None
+    var i = 0
+    while i < 10:
+        if i == 7:
+            opt = Some(make(3))
+        i += 1
+    print(opt)
+
+    var hold = ""
+    loop:
+        hold = label(42)
+        break
+    print(hold)
+
+    print(build(4))
+    let ws = ["a", "bb", "cccc", "ddddd"]
+    print(find_long(&ws))
+    print(parse_all(&["1", "2", "3"]), parse_all(&["1", "x"]))
+
+    var recs: list[Rec] = []
+    for k in 0..3:
+        recs.push(build(k + 1))
+    recs[0].tags.push("extra")
+    for r in recs:
+        print(r.name, r.tags, r.score)
+
+    var pairs: list[(str, int)] = []
+    for w in "the quick brown fox".split(" "):
+        pairs.push((w.upper(), len(w)))
+    print(pairs)
+
+    var acc: list[str] = []
+    for round in 0..3:
+        var tmp: list[str] = []
+        for j in 0..2:
+            tmp.push(label(round * 10 + j))
+        if round == 1:
+            acc = tmp
+    print(acc)
+#> [0, 1, 2, 3, 4]
+#> n49
+#> Some([0, 1, 2])
+#> n42
+#> Rec(name="n300", tags=["n0", "n1", "n2", "n3"], score=6)
+#> Some("CCCC")
+#> Ok([1, 2, 3]) Err("bad: x")
+#> n0 ["n0", "extra"] 0
+#> n100 ["n0", "n1"] 1
+#> n200 ["n0", "n1", "n2"] 3
+#> [("THE", 3), ("QUICK", 5), ("BROWN", 5), ("FOX", 3)]
+#> ["n10", "n11"]

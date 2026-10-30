@@ -1,0 +1,46 @@
+# logging: levels, formats, child loggers, file output
+
+import logging
+import os
+fn main():
+    var log = logging.get_logger("app")
+    print(log.level, log.enabled(logging.INFO), log.enabled(logging.ERROR))
+    print(log.render(logging.WARNING, &"careful"))
+    log.set_format("[%(levelname)-8s] %(name)s/%(levelno)d: %(message)s 100%% |%(levelname)7s|%(bogus)s")
+    print(log.render(logging.INFO, &"hello"))
+    print(log.child("db").render(logging.ERROR, &"x"))
+    log.set_format("%(asctime)s %(process)d %(created)f")
+    let r = log.render(logging.INFO, &"")
+    print(len(r.split(" ")[0]), len(r.split(" ")[1]), r.split(" ")[1][8:9], r.split(" ")[2] == str(os.getpid()))
+    for s in ["debug", "WARN", "fatal", "15", "nope"]:
+        print(s, logging.parse_level(&s), logging.level_name(logging.parse_level(&s).unwrap_or(-1)))
+    let tmp = os.mkdtemp("logtest").unwrap()
+    let f = tmp + "/a.log"
+    var fl = logging.get_logger("file")
+    fl.set_level(logging.DEBUG)
+    fl.to_stderr(false)
+    fl.to_file(f.clone())
+    fl.debug("one")
+    fl.info("two")
+    fl.set_level(logging.ERROR)
+    fl.warning("dropped")
+    fl.critical("three")
+    print(os.read(f.clone()).unwrap())
+    os.remove_all(tmp).unwrap()
+    logging.warning("to stderr")
+    logging.debug("dropped too")
+
+#> 30 false true
+#> WARNING:app:careful
+#> [INFO    ] app/20: hello 100% |   INFO|%(bogus)
+#> [ERROR   ] app.db/40: x 100% |  ERROR|%(bogus)
+#> 10 12 , true
+#> debug Some(10) DEBUG
+#> WARN Some(30) WARNING
+#> fatal Some(50) CRITICAL
+#> 15 Some(15) Level 15
+#> nope None Level -1
+#> DEBUG:file:one
+#> INFO:file:two
+#> CRITICAL:file:three
+#>

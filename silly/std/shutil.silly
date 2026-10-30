@@ -1,0 +1,110 @@
+# Copying, moving and removing whole files and trees, and finding programs, like
+# Python's shutil.
+#
+#     import shutil
+#     fn main():
+#         shutil.copytree("assets", "build/assets").unwrap()
+#         shutil.move("out.txt", "build/").unwrap()
+#         match shutil.which("gcc"):
+#             case Some(p): print("gcc is", p)
+#             case None: print("no gcc")
+
+import os
+import path
+
+# Copies a file's contents to dst; if dst is a directory, into it under the same
+# name. Returns the path written.
+fn copyfile(src: str, dst: str) -> Result[str, str]:
+    var to = dst
+    if os.is_dir(dst.clone()):
+        to = path.join(dst, path.basename(&src))
+    os.copy(src, to.clone())?
+    return Ok(to)
+
+# Like copyfile, and copies the permission bits too.
+fn copy(src: str, dst: str) -> Result[str, str]:
+    let to = copyfile(src.clone(), dst)?
+    os.chmod(to.clone(), os.mode(src)?)?
+    return Ok(to)
+
+# Copies a directory and everything in it to dst, which must not exist yet.
+# Symbolic links are copied as links.
+fn copytree(src: str, dst: str) -> Result[bool, str]:
+    if not os.is_dir(src.clone()):
+        return Err("not a directory: " + src)
+    if os.exists(dst.clone()):
+        return Err("already exists: " + dst)
+    _copytree(&src, &dst)?
+    return Ok(true)
+
+fn _copytree(src: &str, dst: &str) -> Result[bool, str]:
+    os.mkdir(dst.clone())?
+    os.chmod(dst.clone(), os.mode(src.clone())?)?
+    for name in os.listdir(src.clone())?:
+        let s = path.join(src.clone(), name.clone())
+        let d = path.join(dst.clone(), name.clone())
+        if os.is_link(s.clone()):
+            os.symlink(os.readlink(s.clone())?, d)?
+        elif os.is_dir(s.clone()):
+            _copytree(&s, &d)?
+        else:
+            copy(s, d)?
+    return Ok(true)
+
+# Removes a directory tree (or a file).
+fn rmtree(p: str) -> Result[bool, str]:
+    if not os.exists(p.clone()) and not os.is_link(p.clone()):
+        return Err("no such file or directory: " + p)
+    return os.remove_all(p)
+
+# Moves a file or tree; into dst when dst is a directory. Falls back to copying
+# and removing when a rename can't cross file systems. Returns the new path.
+fn move(src: str, dst: str) -> Result[str, str]:
+    var to = dst
+    if os.is_dir(dst.clone()):
+        to = path.join(dst, path.basename(&_strip_slash(&src)))
+        if os.exists(to.clone()):
+            return Err("destination path already exists: " + to)
+    match os.rename(src.clone(), to.clone()):
+        case Ok(_): return Ok(to)
+        case Err(_): pass
+    if os.is_dir(src.clone()) and not os.is_link(src.clone()):
+        copytree(src.clone(), to.clone())?
+    else:
+        copy(src.clone(), to.clone())?
+    os.remove_all(src)?
+    return Ok(to)
+
+fn _strip_slash(p: &str) -> str:
+    var s = p.clone()
+    while len(s) > 1 and s.ends_with("/"):
+        s = s[0:len(s) - 1]
+    return s
+
+# The full path of a program found on $PATH (or the name itself if it holds a
+# "/" and is executable), like the shell's `which`.
+fn which(name: str) -> Option[str]:
+    if name.contains("/"):
+        return Some(name) if _executable(&name) else None
+    for dir in os.getenv_or("PATH", "/usr/local/bin:/usr/bin:/bin").split(":"):
+        let p = path.join(("." if dir == "" else dir), name.clone())
+        if _executable(&p):
+            return Some(p)
+    return None
+
+fn _executable(p: &str) -> bool:
+    if not os.is_file(p.clone()):
+        return false
+    match os.mode(p.clone()):
+        case Ok(m): return m & 0o111 != 0
+        case Err(_): return false
+
+# The total size in bytes of a file, or of every file under a directory.
+fn tree_size(p: str) -> Result[int, str]:
+    if not os.is_dir(p.clone()):
+        return os.file_size(p)
+    var n = 0
+    for f in os.walk(p)?:
+        if not os.is_link(f.clone()):
+            n += os.file_size(f)?
+    return Ok(n)

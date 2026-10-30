@@ -1,0 +1,1495 @@
+# ui: themed widgets for gfx windows, in the spirit of Tk's ttk.
+#
+# The toolkit is immediate mode. Your program keeps its own state in ordinary
+# variables and describes the whole window every frame. Widgets edit that state
+# through `&mut` and return true when the user changed it or clicked:
+#
+#     import ui
+#
+#     fn main():
+#         var app = ui.app("Hello", 420, 240)
+#         var name = ""
+#         var loud = false
+#         while app.frame():
+#             app.heading("Greeter")
+#             app.entry("Your name", &mut name)
+#             app.checkbox("Shout", &mut loud)
+#             if app.button("Quit"):
+#                 app.close()
+#
+# Widgets are laid out top to bottom. row()/column()/grid(n)/group(title)/
+# scroll(id, h) open containers that end with end(). frame() sleeps until
+# there is input, so an idle window uses no CPU.
+
+import gfx
+
+const PAD: int = 12
+const GAP: int = 8
+const ROW_H: int = 28
+const FIELD_W: int = 200
+const FONT: int = 0
+
+const _COL: int = 0
+const _ROW: int = 1
+const _GRID: int = 2
+
+const _BLINK: int = 530
+const _TIP_DELAY: int = 600
+
+# A rectangle in window pixels.
+struct Rect:
+    x: int
+    y: int
+    w: int
+    h: int
+
+    fn contains(self, px: int, py: int) -> bool:
+        return px >= self.x and py >= self.y and px < self.x + self.w and py < self.y + self.h
+
+    fn intersect(self, o: Rect) -> Rect:
+        let x0 = max(self.x, o.x)
+        let y0 = max(self.y, o.y)
+        let x1 = min(self.x + self.w, o.x + o.w)
+        let y1 = min(self.y + self.h, o.y + o.h)
+        return Rect(x0, y0, max(0, x1 - x0), max(0, y1 - y0))
+
+    fn inset(self, d: int) -> Rect:
+        return Rect(self.x + d, self.y + d, max(0, self.w - 2 * d), max(0, self.h - 2 * d))
+
+    fn is_empty(self) -> bool:
+        return self.w <= 0 or self.h <= 0
+
+# ---- themes ----
+
+# The colours widgets are drawn with.
+struct Theme:
+    bg: int
+    fg: int
+    dim: int
+    field: int
+    border: int
+    focus: int
+    accent: int
+    accent_fg: int
+    button: int
+    button_hover: int
+    button_down: int
+    select: int
+    select_fg: int
+    trough: int
+    tooltip_bg: int
+    tooltip_fg: int
+    shadow: int
+    radius: int
+
+# The default light theme.
+fn light() -> Theme:
+    return Theme(0xFFF3F4F6, 0xFF1F2328, 0xFF6B7280, 0xFFFFFFFF, 0xFFC4CAD3, 0xFF3B82F6,
+                 0xFF2563EB, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFF0F2F5, 0xFFE1E5EA, 0xFFC7DDFB,
+                 0xFF111827, 0xFFE2E5EA, 0xFF1F2937, 0xFFF9FAFB, 0x38000000, 6)
+
+# A dark theme.
+fn dark() -> Theme:
+    return Theme(0xFF1E1F22, 0xFFE6E7EA, 0xFF9AA0A6, 0xFF2B2D31, 0xFF464950, 0xFF60A5FA,
+                 0xFF3B82F6, 0xFFFFFFFF, 0xFF2F3136, 0xFF383A40, 0xFF44474E, 0xFF2D4A75,
+                 0xFFFFFFFF, 0xFF3A3C42, 0xFFF3F4F6, 0xFF111827, 0x70000000, 6)
+
+# ---- layout boxes ----
+
+# A container being filled. The cursor (cx, cy) is where the next widget goes.
+struct _Box:
+    kind: int
+    x: int
+    y: int
+    w: int
+    cx: int
+    cy: int
+    line_h: int
+    max_x: int
+    cols: int
+    col: int
+    deco: int      # 0 plain, 1 group, 2 scroll
+    sid: int       # scroll id
+    view_h: int    # scroll viewport height
+    top: int       # y where the box's area starts on screen
+
+# ---- the app ----
+
+# A window of immediate-mode widgets (see app()); call frame() once per frame.
+struct App:
+    win: gfx.Window
+    c: gfx.Canvas
+    th: Theme
+    running: bool
+    started: bool
+    dirty: int
+    now: int
+    mx: int
+    my: int
+    m_down: bool
+    m_pressed: bool
+    m_released: bool
+    clicks: int
+    r_pressed: bool
+    wheel: int
+    keys: list[int]          # this frame's key presses in order; 0 = text
+    kmods: list[int]
+    ktext: list[str]
+    press_taken: bool
+    blocked: Rect
+    sim: list[gfx.Event]
+    active: int
+    focus: int
+    focus_text: bool
+    hover_id: int
+    prev_hover: int
+    hover_since: int
+    order: list[int]
+    want_cursor: int
+    cur_cursor: int
+    enabled: bool
+    next_w: int
+    boxes: list[_Box]
+    titles: list[str]
+    clips: list[Rect]
+    cursor: map[int, int]
+    anchor: map[int, int]
+    xscroll: map[int, int]
+    scrolls: map[int, int]
+    seen: map[int, int]
+    blink0: int
+    pop_id: int
+    pop_r: Rect
+    pop_items: list[str]
+    pop_sel: int
+    pop_top: int
+    pop_fresh: bool
+    pick_id: int
+    pick: int
+    tip: str
+    last_id: int
+    last_r: Rect
+    entered_id: int
+    last_entered: int
+
+    # ---- frames ----
+
+    # Finishes the previous frame, waits for input and starts the next one.
+    # Returns false once the window is closed.
+    fn frame(mut self) -> bool:
+        if self.started:
+            self._finish()
+        self.started = true
+        if not self.running:
+            self.win.close()
+            return false
+        if self.dirty == 0 and self.sim.is_empty():
+            self.win.wait(self._timeout())
+        if self.dirty > 0:
+            self.dirty -= 1
+        self._gather()
+        if not self.running:
+            self.win.close()
+            return false
+        self.now = gfx.ticks()
+        self.c = self.win.canvas()
+        let w = self.c.width()
+        let h = self.c.height()
+        self.boxes.clear()
+        self.titles.clear()
+        self.clips.clear()
+        self.order.clear()
+        self.seen.clear()
+        self.hover_id = 0
+        self.want_cursor = gfx.CURSOR_ARROW
+        self.enabled = true
+        self.next_w = 0
+        self.press_taken = false
+        self.focus_text = false
+        self.tip = ""
+        self.last_id = 0
+        self.last_entered = 0
+        self.entered_id = 0
+        if self.pop_id != 0:
+            self.blocked = self.pop_r
+        else:
+            self.blocked = Rect(0, 0, 0, 0)
+        self.c.clear(self.th.bg)
+        self.clips.push(Rect(0, 0, w, h))
+        self.c.unclip()
+        self.boxes.push(_Box(_COL, PAD, PAD, w - 2 * PAD, PAD, PAD, 0, PAD, 1, 0, 0, 0, 0, PAD))
+        self.titles.push("")
+        return true
+
+    fn _timeout(self) -> int:
+        if self.hover_id != 0 and self.now - self.hover_since < _TIP_DELAY + 50:
+            return 50
+        if self.focus_text:
+            return _BLINK - (self.now - self.blink0) % _BLINK
+        return 1000
+
+    fn _gather(mut self):
+        self.m_pressed = false
+        self.m_released = false
+        self.r_pressed = false
+        self.wheel = 0
+        self.keys.clear()
+        self.kmods.clear()
+        self.ktext.clear()
+        var evs = self.win.events()
+        while not self.sim.is_empty():
+            evs.push(self.sim.remove(0))
+        if not evs.is_empty():
+            self.dirty = max(self.dirty, 1)
+        for e in evs:
+            match e:
+                case Quit:
+                    self.running = false
+                case MouseMove(x, y):
+                    self.mx = x
+                    self.my = y
+                case MouseDown(x, y, b, n):
+                    self.mx = x
+                    self.my = y
+                    if b == gfx.MOUSE_LEFT:
+                        self.m_down = true
+                        self.m_pressed = true
+                        self.clicks = n
+                    elif b == gfx.MOUSE_RIGHT:
+                        self.r_pressed = true
+                case MouseUp(x, y, b):
+                    self.mx = x
+                    self.my = y
+                    if b == gfx.MOUSE_LEFT:
+                        self.m_down = false
+                        self.m_released = true
+                case Wheel(dx, dy):
+                    self.wheel += dy
+                case KeyDown(k, m, r):
+                    self.keys.push(k)
+                    self.kmods.push(m)
+                    self.ktext.push("")
+                case Text(s):
+                    self.keys.push(0)
+                    self.kmods.push(0)
+                    self.ktext.push(s.clone())
+                case MouseLeave:
+                    self.mx = -1
+                    self.my = -1
+                case _:
+                    pass
+
+    fn _finish(mut self):
+        while len(self.boxes) > 1:
+            self.end()
+        if self.pop_id != 0:
+            self._popup()
+        if self.tip != "":
+            self._draw_tip()
+        if self.hover_id != self.prev_hover:
+            self.prev_hover = self.hover_id
+            self.hover_since = self.now
+        for ki in 0..len(self.keys):
+            if self.keys[ki] != gfx.KEY_TAB or self.order.is_empty():
+                continue
+            let n = len(self.order)
+            let back = (self.kmods[ki] & gfx.MOD_SHIFT) != 0
+            var next = 0
+            match self.order.index_of(self.focus):
+                case Some(i):
+                    if back:
+                        next = (i + n - 1) % n
+                    else:
+                        next = (i + 1) % n
+                case None:
+                    if back:
+                        next = n - 1
+            self.focus = self.order[next]
+            self.blink0 = self.now
+            self.dirty = max(self.dirty, 1)
+        if self.m_pressed and not self.press_taken:
+            self.focus = 0
+        if self.m_released:
+            self.active = 0
+        var cur = self.want_cursor
+        if not self.enabled and cur == gfx.CURSOR_HAND:
+            cur = gfx.CURSOR_ARROW
+        if cur != self.cur_cursor:
+            self.win.set_cursor(cur)
+            self.cur_cursor = cur
+        self.win.present()
+
+    # ---- app-level controls ----
+
+    # Closes the window; the next frame() returns false.
+    fn close(mut self):
+        self.running = false
+
+    # Draws another frame right away instead of waiting for input.
+    fn redraw(mut self):
+        self.dirty = max(self.dirty, 1)
+
+    fn set_theme(mut self, t: Theme):
+        self.th = t
+        self.dirty = max(self.dirty, 1)
+
+    fn theme(self) -> Theme:
+        return self.th
+
+    fn set_title(self, s: str):
+        self.win.set_title(s)
+
+    # The canvas being drawn this frame, for custom painting.
+    fn canvas(self) -> gfx.Canvas:
+        return self.c
+
+    fn width(self) -> int:
+        return self.c.width()
+
+    fn height(self) -> int:
+        return self.c.height()
+
+    fn mouse_x(self) -> int:
+        return self.mx
+
+    fn mouse_y(self) -> int:
+        return self.my
+
+    fn mouse_down(self) -> bool:
+        return self.m_down
+
+    # Queues an input event as if it came from the window (for tests and demos).
+    fn simulate(mut self, e: gfx.Event):
+        self.sim.push(e)
+
+    # Headless only: how many frames to show before quitting (0 = never).
+    fn set_frame_limit(self, n: int):
+        self.win.set_frame_limit(n)
+
+    # True if `key` was pressed this frame with exactly `mods` held.
+    fn key_pressed(self, key: int, mods: int) -> bool:
+        for i in 0..len(self.keys):
+            if self.keys[i] == key and (self.kmods[i] & 15) == mods:
+                return true
+        return false
+
+    fn _key(self, key: int) -> bool:
+        return self.keys.contains(key)
+
+    fn _key_mods(self, key: int) -> int:
+        for i in 0..len(self.keys):
+            if self.keys[i] == key:
+                return self.kmods[i]
+        return 0
+
+    # Greys out and disables the widgets that follow, until set_enabled(true).
+    fn set_enabled(mut self, on: bool):
+        self.enabled = on
+
+    # Gives the next widget a fixed width.
+    fn width_next(mut self, w: int):
+        self.next_w = w
+
+    # True if Return was pressed in the most recent entry() this frame.
+    fn entered(self) -> bool:
+        return self.last_id != 0 and self.last_entered == self.last_id
+
+    # Where the most recent widget was placed this frame.
+    fn last_rect(self) -> Rect:
+        return self.last_r
+
+    # Moves keyboard focus to the most recent widget.
+    fn focus_last(mut self):
+        self.focus = self.last_id
+        self.blink0 = self.now
+
+    # ---- ids and interaction ----
+
+    fn _id(mut self, label: &str) -> int:
+        var h = 2166136261
+        for b in label.bytes():
+            h = (h ^ (b as int)) * 1099511628211
+        let n = self.seen.get_or(h, 0)
+        self.seen[h] = n + 1
+        if n > 0:
+            h = (h ^ n) * 1099511628211
+        if h == 0:
+            h = 1
+        return h
+
+    fn _over(self, r: Rect) -> bool:
+        if not r.contains(self.mx, self.my):
+            return false
+        if not self.clips[-1].contains(self.mx, self.my):
+            return false
+        return not self.blocked.contains(self.mx, self.my)
+
+    # Hover 1, pressed this frame 2, clicked 4, held 8.
+    fn _interact(mut self, id: int, r: Rect, focusable: bool) -> int:
+        self.last_id = id
+        self.last_r = r
+        if not self.enabled:
+            if self.focus == id:
+                self.focus = 0
+            return 0
+        if focusable:
+            self.order.push(id)
+        var f = 0
+        let over = self._over(r)
+        if over:
+            f = f | 1
+            self.hover_id = id
+        if over and self.m_pressed and not self.press_taken:
+            self.press_taken = true
+            self.active = id
+            f = f | 2
+            if focusable:
+                if self.focus != id:
+                    self.blink0 = self.now
+                self.focus = id
+            else:
+                self.focus = 0
+        if self.active == id and self.m_down:
+            f = f | 8
+        if self.active == id and self.m_released and over:
+            f = f | 4
+        return f
+
+    # Return or Space on the focused widget.
+    fn _activate_key(self, id: int) -> bool:
+        return self.focus == id and (self.key_pressed(gfx.KEY_RETURN, 0) or self.key_pressed(gfx.KEY_SPACE, 0))
+
+    fn _focus_ring(self, r: Rect, id: int):
+        if self.focus == id and self.enabled:
+            self.c.round_rect(r.x - 2, r.y - 2, r.w + 4, r.h + 4, self.th.radius + 2, 2, gfx.with_alpha(self.th.focus, 150))
+
+    fn _fg(self) -> int:
+        if self.enabled:
+            return self.th.fg
+        return self.th.dim
+
+    # ---- layout ----
+
+    # Where the next widget goes and how wide it may be, without claiming it.
+    fn _peek(self) -> Rect:
+        let b = self.boxes[-1]
+        if b.kind == _ROW:
+            return Rect(b.cx, b.y, max(0, b.x + b.w - b.cx), 0)
+        if b.kind == _GRID:
+            let cw = (b.w - GAP * (b.cols - 1)) / b.cols
+            return Rect(b.x + b.col * (cw + GAP), b.cy, cw, 0)
+        return Rect(b.x, b.cy, b.w, 0)
+
+    # Claims a w x h area at the cursor and moves the cursor past it.
+    fn _commit(mut self, w: int, h: int):
+        let b = self.boxes[-1]
+        if b.kind == _ROW:
+            self.boxes[-1].cx = b.cx + w + GAP
+            self.boxes[-1].line_h = max(b.line_h, h)
+            self.boxes[-1].max_x = max(b.max_x, b.cx + w)
+        elif b.kind == _GRID:
+            self.boxes[-1].line_h = max(b.line_h, h)
+            self.boxes[-1].col = b.col + 1
+            if b.col + 1 == b.cols:
+                self.boxes[-1].col = 0
+                self.boxes[-1].cy = b.cy + max(b.line_h, h) + GAP
+                self.boxes[-1].line_h = 0
+            self.boxes[-1].max_x = b.x + b.w
+        else:
+            self.boxes[-1].cy = b.cy + h + GAP
+            self.boxes[-1].max_x = max(b.max_x, b.x + w)
+
+    # Places a widget: `want` is its natural width; `fill` widgets stretch to
+    # the column (FIELD_W in a row).
+    fn _slot(mut self, want: int, h: int, fill: bool) -> Rect:
+        let p = self._peek()
+        let kind = self.boxes[-1].kind
+        var w = want
+        if fill:
+            if kind == _ROW:
+                w = FIELD_W
+            else:
+                w = p.w
+        elif kind != _ROW:
+            w = min(want, p.w)
+        if self.next_w > 0:
+            w = self.next_w
+            self.next_w = 0
+        var y = p.y
+        if kind != _COL:
+            let lh = self._line_h()
+            if h < lh:
+                y = y + (lh - h) / 2
+        self._commit(w, max(h, self._row_floor()))
+        return Rect(p.x, y, w, h)
+
+    # Row height for text-only widgets: tall enough to line up with buttons
+    # beside them in rows and grids.
+    fn _line_h(self) -> int:
+        if self.boxes[-1].kind == _COL:
+            return 20
+        return ROW_H
+
+    fn _row_floor(self) -> int:
+        if self.boxes[-1].kind == _COL:
+            return 0
+        return ROW_H
+
+    fn _push(mut self, kind: int, cols: int, deco: int, inset: int, title: str):
+        let p = self._peek()
+        let x = p.x + inset
+        var y = p.y + inset
+        if deco == 1 and title != "":
+            y = p.y + 22
+        self.boxes.push(_Box(kind, x, y, max(0, p.w - 2 * inset), x, y, 0, x, max(1, cols), 0, deco, 0, 0, p.y))
+        self.titles.push(title)
+
+    # Lays out the following widgets left to right.
+    fn row(mut self):
+        self._push(_ROW, 1, 0, 0, "")
+
+    # Lays out the following widgets top to bottom (inside a row or grid).
+    fn column(mut self):
+        self._push(_COL, 1, 0, 0, "")
+
+    # Lays out the following widgets in `n` equal columns.
+    fn grid(mut self, n: int):
+        self._push(_GRID, n, 0, 0, "")
+
+    # A framed, titled column.
+    fn group(mut self, title: str):
+        self._push(_COL, 1, 1, PAD, title)
+
+    # Closes the innermost row, column, grid, group or scroll area.
+    fn end(mut self):
+        if len(self.boxes) <= 1:
+            return
+        let b = self.boxes.pop()
+        let title = self.titles.pop()
+        var used_h = 0
+        if b.kind == _ROW:
+            used_h = b.line_h
+        elif b.kind == _GRID:
+            var bottom = b.cy
+            if b.col > 0:
+                bottom = b.cy + b.line_h + GAP
+            used_h = max(0, bottom - GAP - b.y)
+        else:
+            used_h = max(0, b.cy - GAP - b.y)
+        var used_w = b.max_x - b.x
+        if b.kind == _GRID:
+            used_w = b.w
+        if b.deco == 2:
+            self._end_scroll(b, used_h)
+            return
+        var outer_w = used_w
+        var outer_h = used_h + (b.y - b.top)
+        if b.deco == 1:
+            outer_w = b.w + 2 * PAD
+            outer_h = outer_h + PAD
+            let x0 = b.x - PAD
+            let ty = b.top + 9
+            self.c.round_rect(x0, ty, outer_w, outer_h - 9, self.th.radius, 1, self.th.border)
+            if title != "":
+                let tw = gfx.text_width(title, gfx.FONT_BOLD)
+                self.c.fill_rect(x0 + 10, ty - 1, tw + 8, 3, self.th.bg)
+                self.c.text(x0 + 14, b.top, title, self._fg(), gfx.FONT_BOLD)
+        self._commit(outer_w, outer_h)
+
+    # A scrolling area `h` pixels tall; close it with end().
+    fn scroll(mut self, id: str, h: int):
+        let sid = self._id(id)
+        let p = self._peek()
+        let r = Rect(p.x, p.y, p.w, h)
+        let off = self.scrolls.get_or(sid, 0)
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, self.th.field)
+        self._push_clip(r.inset(1))
+        let x = p.x + 8
+        let y = p.y + 8 - off
+        self.boxes.push(_Box(_COL, x, y, max(0, p.w - 16 - 10), x, y, 0, x, 1, 0, 2, sid, h, p.y))
+        self.titles.push("")
+
+    fn _end_scroll(mut self, b: _Box, used_h: int):
+        self._pop_clip()
+        let r = Rect(b.x - 8, b.top, b.w + 26, b.view_h)
+        let content = used_h + 16
+        let max_off = max(0, content - r.h)
+        var off = min(self.scrolls.get_or(b.sid, 0), max_off)
+        if self._over(r) and self.wheel != 0:
+            off = off - self.wheel * 40
+            self.wheel = 0
+        if max_off > 0:
+            let tr = Rect(r.x + r.w - 10, r.y + 2, 8, r.h - 4)
+            let th_h = max(24, tr.h * r.h / content)
+            let f = self._interact(b.sid, tr, false)
+            if (f & 8) != 0:
+                off = (self.my - tr.y - th_h / 2) * max_off / max(1, tr.h - th_h)
+            off = max(0, min(off, max_off))
+            let ty = tr.y + (tr.h - th_h) * off / max_off
+            var col = self.th.border
+            if (f & 9) != 0:
+                col = self.th.dim
+            self.c.fill_round_rect(tr.x + 1, ty, 6, th_h, 3, col)
+        else:
+            off = 0
+        self.scrolls[b.sid] = off
+        self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, self.th.border)
+        self._commit(r.w, r.h)
+
+    fn _push_clip(mut self, r: Rect):
+        let k = self.clips[-1].intersect(r)
+        self.clips.push(k)
+        self.c.clip(k.x, k.y, k.w, k.h)
+
+    fn _pop_clip(mut self):
+        if len(self.clips) > 1:
+            self.clips.pop()
+        let k = self.clips[-1]
+        self.c.clip(k.x, k.y, k.w, k.h)
+
+    # ---- text ----
+
+    fn _text(mut self, s: &str, font: int, color: int, h: int):
+        let r = self._slot(gfx.text_width(s, font), h, false)
+        self.c.text(r.x, r.y + (h - gfx.font_height(font)) / 2, s, color, font)
+
+    fn label(mut self, s: &str):
+        self._text(s, FONT, self._fg(), 20)
+
+    fn heading(mut self, s: &str):
+        self._text(s, gfx.FONT_HEADING, self._fg(), 26)
+
+    fn title(mut self, s: &str):
+        self._text(s, gfx.FONT_TITLE, self._fg(), 38)
+
+    # Small, dimmed text.
+    fn caption(mut self, s: &str):
+        self._text(s, gfx.FONT_SMALL, self.th.dim, 16)
+
+    # Text in a fixed-width font.
+    fn code(mut self, s: &str):
+        self._text(s, gfx.FONT_MONO, self._fg(), 20)
+
+    # Text wrapped to the available width; "\n" starts a new line.
+    fn paragraph(mut self, s: &str):
+        let p = self._peek()
+        var w = p.w
+        if self.boxes[-1].kind == _ROW:
+            w = 2 * FIELD_W
+        let lines = _wrap(s, FONT, w)
+        let r = self._slot(w, 19 * len(lines), false)
+        var y = r.y
+        for ln in lines:
+            self.c.text(r.x, y, ln, self._fg(), FONT)
+            y += 19
+
+    # A horizontal rule (a vertical one in a row).
+    fn separator(mut self):
+        if self.boxes[-1].kind == _ROW:
+            let r = self._slot(1, ROW_H, false)
+            self.c.fill_rect(r.x, r.y + 4, 1, r.h - 8, self.th.border)
+        else:
+            let r = self._slot(0, 9, true)
+            self.c.fill_rect(r.x, r.y + 4, r.w, 1, self.th.border)
+
+    # Empty space: `n` pixels down in a column, across in a row.
+    fn spacer(mut self, n: int):
+        if self.boxes[-1].kind == _ROW:
+            self._slot(n, 0, false)
+        else:
+            self._slot(0, n, false)
+
+    # Shows a canvas as an image.
+    fn image(mut self, img: gfx.Canvas):
+        let r = self._slot(img.width(), img.height(), false)
+        self.c.blit(img, r.x, r.y, 255)
+
+    # Reserves an area for custom drawing on canvas(); w <= 0 fills the width.
+    fn area(mut self, w: int, h: int) -> Rect:
+        return self._slot(w, h, w <= 0)
+
+    # Shows `text` when the mouse rests on the previous widget.
+    fn tooltip(mut self, text: &str):
+        if self.last_id != 0 and self.hover_id == self.last_id and not self.m_down:
+            if self.now - self.hover_since >= _TIP_DELAY:
+                self.tip = text.clone()
+
+    fn _draw_tip(mut self):
+        let w = gfx.text_width(self.tip, gfx.FONT_SMALL) + 16
+        let h = 24
+        var x = self.mx + 12
+        var y = self.my + 20
+        if x + w > self.c.width() - 4:
+            x = max(4, self.c.width() - 4 - w)
+        if y + h > self.c.height() - 4:
+            y = max(4, self.my - h - 8)
+        self.c.fill_round_rect(x + 1, y + 2, w, h, 5, self.th.shadow)
+        self.c.fill_round_rect(x, y, w, h, 5, self.th.tooltip_bg)
+        self.c.text(x + 8, y + (h - gfx.font_height(gfx.FONT_SMALL)) / 2, self.tip, self.th.tooltip_fg, gfx.FONT_SMALL)
+
+    # ---- buttons and toggles ----
+
+    fn _button(mut self, label: &str, primary: bool) -> bool:
+        let text = _shown(label)
+        let id = self._id(label)
+        let r = self._slot(max(80, gfx.text_width(text, FONT) + 32), ROW_H, false)
+        let f = self._interact(id, r, true)
+        if (f & 1) != 0:
+            self.want_cursor = gfx.CURSOR_HAND
+        let down = (f & 9) == 9
+        let hover = (f & 1) != 0
+        var bg = self.th.button
+        var fg = self._fg()
+        if primary:
+            bg = self.th.accent
+            fg = self.th.accent_fg
+            if down:
+                bg = gfx.mix(bg, gfx.BLACK, 0.18)
+            elif hover:
+                bg = gfx.mix(bg, gfx.WHITE, 0.12)
+        elif down:
+            bg = self.th.button_down
+        elif hover:
+            bg = self.th.button_hover
+        if not self.enabled:
+            bg = gfx.mix(bg, self.th.bg, 0.5)
+            if primary:
+                fg = gfx.mix(fg, bg, 0.4)
+        if not down:
+            self.c.fill_round_rect(r.x, r.y + 1, r.w, r.h, self.th.radius, gfx.with_alpha(self.th.shadow, 40))
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, bg)
+        if not primary:
+            self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, self.th.border)
+        self.c.text_centered(r.x, r.y, r.w, r.h, text, fg, FONT)
+        self._focus_ring(r, id)
+        return (f & 4) != 0 or self._activate_key(id)
+
+    # A push button; true when clicked (or activated with Return/Space).
+    fn button(mut self, label: &str) -> bool:
+        return self._button(label, false)
+
+    # A button in the accent colour, for the main action.
+    fn primary_button(mut self, label: &str) -> bool:
+        return self._button(label, true)
+
+    fn checkbox(mut self, label: &str, v: &mut bool) -> bool:
+        let text = _shown(label)
+        let id = self._id(label)
+        let r = self._slot(26 + gfx.text_width(text, FONT), 20, false)
+        let f = self._interact(id, r, true)
+        var changed = false
+        if (f & 4) != 0 or self._activate_key(id):
+            v = not v
+            changed = true
+        let b = Rect(r.x, r.y + 1, 18, 18)
+        if v:
+            var bg = self.th.accent
+            if not self.enabled:
+                bg = self.th.dim
+            self.c.fill_round_rect(b.x, b.y, 18, 18, 4, bg)
+            var pts: list[f64] = []
+            pts.push(_f(b.x) + 4.5)
+            pts.push(_f(b.y) + 9.5)
+            pts.push(_f(b.x) + 7.5)
+            pts.push(_f(b.y) + 12.5)
+            pts.push(_f(b.x) + 13.5)
+            pts.push(_f(b.y) + 5.5)
+            self.c.polyline(pts, 2.2, self.th.accent_fg)
+        else:
+            var bd = self.th.border
+            if (f & 1) != 0:
+                bd = self.th.accent
+            self.c.fill_round_rect(b.x, b.y, 18, 18, 4, self.th.field)
+            self.c.round_rect(b.x, b.y, 18, 18, 4, 1, bd)
+        self.c.text(r.x + 26, r.y + 1, text, self._fg(), FONT)
+        self._focus_ring(b, id)
+        return changed
+
+    # One choice of several: selects `mine` into `cur` when clicked.
+    fn radio(mut self, label: &str, cur: &mut int, mine: int) -> bool:
+        let text = _shown(label)
+        let id = self._id(label)
+        let r = self._slot(26 + gfx.text_width(text, FONT), 20, false)
+        let f = self._interact(id, r, true)
+        var changed = false
+        if ((f & 4) != 0 or self._activate_key(id)) and cur != mine:
+            cur = mine
+            changed = true
+        let cx = _f(r.x) + 9.0
+        let cy = _f(r.y) + 10.0
+        if cur == mine:
+            var bg = self.th.accent
+            if not self.enabled:
+                bg = self.th.dim
+            self.c.fill_circle(cx, cy, 9.0, bg)
+            self.c.fill_circle(cx, cy, 3.5, self.th.accent_fg)
+        else:
+            var bd = self.th.border
+            if (f & 1) != 0:
+                bd = self.th.accent
+            self.c.fill_circle(cx, cy, 9.0, self.th.field)
+            self.c.circle(cx, cy, 8.5, 1.0, bd)
+        self.c.text(r.x + 26, r.y + 1, text, self._fg(), FONT)
+        self._focus_ring(Rect(r.x, r.y + 1, 18, 18), id)
+        return changed
+
+    # An on/off switch.
+    fn switch(mut self, label: &str, v: &mut bool) -> bool:
+        let text = _shown(label)
+        let id = self._id(label)
+        let r = self._slot(46 + gfx.text_width(text, FONT), 20, false)
+        let f = self._interact(id, r, true)
+        var changed = false
+        if (f & 4) != 0 or self._activate_key(id):
+            v = not v
+            changed = true
+        let t = Rect(r.x, r.y, 36, 20)
+        var bg = self.th.trough
+        var kx = _f(t.x) + 10.0
+        if v:
+            bg = self.th.accent
+            kx = _f(t.x) + 26.0
+        if not self.enabled:
+            bg = gfx.mix(bg, self.th.bg, 0.5)
+        elif (f & 1) != 0:
+            bg = gfx.mix(bg, gfx.BLACK, 0.08)
+        self.c.fill_round_rect(t.x, t.y, t.w, t.h, 10, bg)
+        self.c.fill_circle(kx, _f(t.y) + 10.5, 8.0, gfx.with_alpha(self.th.shadow, 60))
+        self.c.fill_circle(kx, _f(t.y) + 10.0, 8.0, gfx.WHITE)
+        self.c.text(r.x + 46, r.y + 1, text, self._fg(), FONT)
+        self._focus_ring(t, id)
+        return changed
+
+    # ---- text fields ----
+
+    # A one-line text field editing `s`. The label before "##" is shown as a
+    # placeholder while the field is empty. True when the text changed; see
+    # entered() for Return.
+    fn entry(mut self, label: &str, s: &mut str) -> bool:
+        return self._entry(label, &mut s, false)
+
+    # Like entry(), but shows '*' for each character.
+    fn secret_entry(mut self, label: &str, s: &mut str) -> bool:
+        return self._entry(label, &mut s, true)
+
+    fn _entry(mut self, label: &str, s: &mut str, secret: bool) -> bool:
+        let id = self._id(label)
+        let r = self._slot(FIELD_W, ROW_H, true)
+        let f = self._interact(id, r, true)
+        if (f & 1) != 0:
+            self.want_cursor = gfx.CURSOR_TEXT
+        let focused = self.focus == id
+        let inner = Rect(r.x + 8, r.y, max(0, r.w - 16), r.h)
+        var changed = false
+        var cur = min(self.cursor.get_or(id, len(s)), len(s))
+        var anc = min(self.anchor.get_or(id, cur), len(s))
+        var xs = self.xscroll.get_or(id, 0)
+        if focused:
+            self.focus_text = true
+            if (f & 10) != 0:
+                let pos = _pos_at(s, secret, self.mx - inner.x + xs)
+                if (f & 2) != 0:
+                    if self.clicks >= 3:
+                        anc = 0
+                        cur = len(s)
+                    elif self.clicks == 2:
+                        anc = _word_start(s, pos)
+                        cur = _word_end(s, pos)
+                    else:
+                        cur = pos
+                        anc = pos
+                    self.blink0 = self.now
+                elif self.clicks < 2:
+                    cur = pos
+            for i in 0..len(self.keys):
+                let k = self.keys[i]
+                let m = self.kmods[i] & 15
+                let shift = (m & gfx.MOD_SHIFT) != 0
+                let ctrl = (m & gfx.MOD_CTRL) != 0
+                let lo = min(cur, anc)
+                let hi = max(cur, anc)
+                self.blink0 = self.now
+                if k == 0:
+                    s = s[:lo] + self.ktext[i] + s[hi:]
+                    cur = lo + len(self.ktext[i])
+                    anc = cur
+                    changed = true
+                elif k == gfx.KEY_LEFT or k == gfx.KEY_RIGHT:
+                    if lo != hi and not shift:
+                        if k == gfx.KEY_LEFT:
+                            cur = lo
+                        else:
+                            cur = hi
+                    elif k == gfx.KEY_LEFT:
+                        if ctrl:
+                            cur = _word_left(s, cur)
+                        else:
+                            cur = _prev(s, cur)
+                    elif ctrl:
+                        cur = _word_right(s, cur)
+                    else:
+                        cur = _next(s, cur)
+                    if not shift:
+                        anc = cur
+                elif k == gfx.KEY_HOME or k == gfx.KEY_END:
+                    if k == gfx.KEY_HOME:
+                        cur = 0
+                    else:
+                        cur = len(s)
+                    if not shift:
+                        anc = cur
+                elif k == gfx.KEY_BACKSPACE or k == gfx.KEY_DELETE:
+                    var a = lo
+                    var b = hi
+                    if lo == hi:
+                        if k == gfx.KEY_BACKSPACE:
+                            if ctrl:
+                                a = _word_left(s, cur)
+                            else:
+                                a = _prev(s, cur)
+                        elif ctrl:
+                            b = _word_right(s, cur)
+                        else:
+                            b = _next(s, cur)
+                    if a != b:
+                        s = s[:a] + s[b:]
+                        changed = true
+                    cur = a
+                    anc = a
+                elif ctrl and k == ord('a'):
+                    anc = 0
+                    cur = len(s)
+                elif ctrl and (k == ord('c') or k == ord('x')):
+                    if lo != hi and not secret:
+                        gfx.clipboard_set(s[lo:hi].clone())
+                        if k == ord('x'):
+                            s = s[:lo] + s[hi:]
+                            cur = lo
+                            anc = lo
+                            changed = true
+                elif ctrl and k == ord('v'):
+                    let t = gfx.clipboard_get().replace("\n", " ")
+                    s = s[:lo] + t + s[hi:]
+                    cur = lo + len(t)
+                    anc = cur
+                    changed = true
+                elif k == gfx.KEY_RETURN or k == gfx.KEY_KP_ENTER:
+                    self.entered_id = id
+                    self.last_entered = id
+                elif k == gfx.KEY_ESCAPE:
+                    self.focus = 0
+        let disp = _mask(s, secret)
+        let dcur = _disp_index(s, secret, cur)
+        let danc = _disp_index(s, secret, anc)
+        let cx = gfx.text_width(disp[:dcur], FONT)
+        let total = gfx.text_width(disp, FONT)
+        if total <= inner.w - 2:
+            xs = 0
+        else:
+            if cx - xs > inner.w - 2:
+                xs = cx - inner.w + 2
+            if cx < xs:
+                xs = cx
+            xs = max(0, min(xs, total - inner.w + 2))
+        self.cursor[id] = cur
+        self.anchor[id] = anc
+        self.xscroll[id] = xs
+        var bg = self.th.field
+        if not self.enabled:
+            bg = gfx.mix(bg, self.th.bg, 0.6)
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, bg)
+        if focused:
+            self.c.round_rect(r.x - 2, r.y - 2, r.w + 4, r.h + 4, self.th.radius + 2, 2, gfx.with_alpha(self.th.focus, 70))
+            self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, self.th.focus)
+        else:
+            var bd = self.th.border
+            if (f & 1) != 0:
+                bd = self.th.dim
+            self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, bd)
+        self._push_clip(Rect(inner.x - 2, r.y + 2, inner.w + 4, max(0, r.h - 4)))
+        let ty = r.y + (r.h - gfx.font_height(FONT)) / 2
+        let tx = inner.x - xs
+        if focused and dcur != danc:
+            let a = gfx.text_width(disp[:min(dcur, danc)], FONT)
+            let b = gfx.text_width(disp[:max(dcur, danc)], FONT)
+            self.c.fill_rect(tx + a, ty, b - a, gfx.font_height(FONT), self.th.select)
+        if len(s) == 0:
+            self.c.text(inner.x, ty, _shown(label), self.th.dim, FONT)
+        else:
+            self.c.text(tx, ty, disp, self._fg(), FONT)
+        if focused and ((self.now - self.blink0) / _BLINK) % 2 == 0:
+            self.c.fill_rect(tx + cx, ty, 1, gfx.font_height(FONT), self.th.fg)
+        self._pop_clip()
+        return changed
+
+    # ---- numbers ----
+
+    # A horizontal slider over lo..hi. Arrow keys step by 1/20 of the range.
+    fn slider(mut self, label: &str, v: &mut f64, lo: f64, hi: f64) -> bool:
+        let id = self._id(label)
+        let r = self._slot(FIELD_W, 20, true)
+        let f = self._interact(id, r, true)
+        let x0 = r.x + 9
+        let tw = max(1, r.w - 18)
+        let span = hi - lo
+        var nv = v
+        if (f & 10) != 0:
+            self.want_cursor = gfx.CURSOR_HAND
+            nv = lo + span * _f(self.mx - x0) / _f(tw)
+        elif (f & 1) != 0:
+            self.want_cursor = gfx.CURSOR_HAND
+        if self.focus == id:
+            for ki in 0..len(self.keys):
+                let k = self.keys[ki]
+                if k == gfx.KEY_LEFT or k == gfx.KEY_DOWN:
+                    nv = nv - span / 20.0
+                elif k == gfx.KEY_RIGHT or k == gfx.KEY_UP:
+                    nv = nv + span / 20.0
+                elif k == gfx.KEY_HOME:
+                    nv = lo
+                elif k == gfx.KEY_END:
+                    nv = hi
+        if nv < lo:
+            nv = lo
+        if nv > hi:
+            nv = hi
+        let changed = nv != v
+        v = nv
+        var t = 0.0
+        if span > 0.0:
+            t = (nv - lo) / span
+        let kx = _f(x0) + t * _f(tw)
+        let cy = r.y + 10
+        var acc = self.th.accent
+        if not self.enabled:
+            acc = self.th.dim
+        self.c.fill_round_rect(x0, cy - 2, tw, 4, 2, self.th.trough)
+        self.c.fill_round_rect(x0, cy - 2, (kx as int) - x0, 4, 2, acc)
+        self.c.fill_circle(kx, _f(cy) + 0.5, 8.0, gfx.with_alpha(self.th.shadow, 60))
+        self.c.fill_circle(kx, _f(cy), 8.0, gfx.WHITE)
+        self.c.circle(kx, _f(cy), 7.5, 1.0, acc)
+        if self.focus == id and self.enabled:
+            self.c.circle(kx, _f(cy), 10.5, 2.0, gfx.with_alpha(self.th.focus, 150))
+        return changed
+
+    # A bar filled to `frac` (0..1).
+    fn progress(mut self, frac: f64):
+        let r = self._slot(FIELD_W, 8, true)
+        var t = frac
+        if t < 0.0:
+            t = 0.0
+        if t > 1.0:
+            t = 1.0
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, 4, self.th.trough)
+        let w = (t * _f(r.w)) as int
+        if w > 0:
+            self.c.fill_round_rect(r.x, r.y, max(w, 8), r.h, 4, self.th.accent)
+
+    # An integer field with up/down arrows (also arrow keys and the wheel).
+    fn spinbox(mut self, label: &str, v: &mut int, lo: int, hi: int, step: int) -> bool:
+        let id = self._id(label)
+        let r = self._slot(120, ROW_H, false)
+        let f = self._interact(id, r, true)
+        var nv = v
+        let bx = r.x + r.w - 22
+        if (f & 2) != 0 and self.mx >= bx:
+            if self.my < r.y + r.h / 2:
+                nv += step
+            else:
+                nv -= step
+        if (f & 1) != 0 and self.wheel != 0:
+            nv += self.wheel * step
+            self.wheel = 0
+        if self.focus == id:
+            for ki in 0..len(self.keys):
+                let k = self.keys[ki]
+                if k == gfx.KEY_UP:
+                    nv += step
+                elif k == gfx.KEY_DOWN:
+                    nv -= step
+                elif k == gfx.KEY_PAGE_UP:
+                    nv += 10 * step
+                elif k == gfx.KEY_PAGE_DOWN:
+                    nv -= 10 * step
+        nv = max(lo, min(hi, nv))
+        let changed = nv != v
+        v = nv
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, self.th.field)
+        var bd = self.th.border
+        if self.focus == id:
+            bd = self.th.focus
+        self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, bd)
+        self.c.fill_rect(bx, r.y + 1, 1, r.h - 2, self.th.border)
+        self.c.fill_rect(bx, r.y + r.h / 2, 22, 1, self.th.border)
+        let ax = _f(bx) + 11.0
+        let uy = _f(r.y) + _f(r.h) * 0.25
+        let dy = _f(r.y) + _f(r.h) * 0.75
+        self.c.fill_triangle(ax - 4.0, uy + 2.0, ax + 4.0, uy + 2.0, ax, uy - 2.5, self._fg())
+        self.c.fill_triangle(ax - 4.0, dy - 2.0, ax + 4.0, dy - 2.0, ax, dy + 2.5, self._fg())
+        self.c.text(r.x + 8, r.y + (r.h - gfx.font_height(FONT)) / 2, str(nv), self._fg(), FONT)
+        return changed
+
+    # ---- choices ----
+
+    # A drop-down list choosing `sel` from `items`.
+    fn combobox(mut self, label: &str, items: &list[str], sel: &mut int) -> bool:
+        let id = self._id(label)
+        let r = self._slot(FIELD_W, ROW_H, true)
+        var changed = false
+        if self.pick_id == id:
+            changed = self.pick != sel
+            sel = self.pick
+            self.pick_id = 0
+        let f = self._interact(id, r, true)
+        if (f & 1) != 0:
+            self.want_cursor = gfx.CURSOR_HAND
+        let open = self.pop_id == id
+        if not open and len(items) > 0:
+            if (f & 2) != 0 or (self.focus == id and (self._key(gfx.KEY_DOWN) or self._activate_key(id))):
+                self._open_popup(id, r, items, sel)
+        elif open and (f & 2) != 0:
+            self.pop_id = 0
+        var bg = self.th.button
+        if (f & 1) != 0:
+            bg = self.th.button_hover
+        if not self.enabled:
+            bg = gfx.mix(bg, self.th.bg, 0.5)
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, bg)
+        self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, self.th.border)
+        self._push_clip(Rect(r.x + 2, r.y, max(0, r.w - 28), r.h))
+        if sel >= 0 and sel < len(items):
+            self.c.text(r.x + 10, r.y + (r.h - gfx.font_height(FONT)) / 2, items[sel], self._fg(), FONT)
+        else:
+            self.c.text(r.x + 10, r.y + (r.h - gfx.font_height(FONT)) / 2, _shown(label), self.th.dim, FONT)
+        self._pop_clip()
+        let ax = _f(r.x + r.w - 15)
+        let ay = _f(r.y) + _f(r.h) / 2.0
+        self.c.line(ax - 4.0, ay - 2.0, ax, ay + 2.0, 1.6, self._fg())
+        self.c.line(ax, ay + 2.0, ax + 4.0, ay - 2.0, 1.6, self._fg())
+        self._focus_ring(r, id)
+        return changed
+
+    fn _open_popup(mut self, id: int, r: Rect, items: &list[str], sel: int):
+        let n = len(items)
+        let rows = min(n, 8)
+        let h = rows * 26 + 8
+        var y = r.y + r.h + 4
+        if y + h > self.c.height() and r.y - h - 4 >= 0:
+            y = r.y - h - 4
+        self.pop_id = id
+        self.pop_r = Rect(r.x, y, r.w, h)
+        self.pop_items = items.clone()
+        self.pop_sel = max(0, min(sel, n - 1))
+        self.pop_top = max(0, min(self.pop_sel - rows / 2, n - rows))
+        self.pop_fresh = true
+        self.dirty = max(self.dirty, 1)
+
+    # Draws the open combobox list over everything and handles its input.
+    fn _popup(mut self):
+        self.blocked = Rect(0, 0, 0, 0)
+        let r = self.pop_r
+        let n = len(self.pop_items)
+        let rows = min(n, 8)
+        var pick = -1
+        if not self.pop_fresh:
+            for ki in 0..len(self.keys):
+                let k = self.keys[ki]
+                if k == gfx.KEY_DOWN:
+                    self.pop_sel = min(n - 1, self.pop_sel + 1)
+                elif k == gfx.KEY_UP:
+                    self.pop_sel = max(0, self.pop_sel - 1)
+                elif k == gfx.KEY_RETURN or k == gfx.KEY_SPACE or k == gfx.KEY_KP_ENTER:
+                    pick = self.pop_sel
+                elif k == gfx.KEY_ESCAPE or k == gfx.KEY_TAB:
+                    self.pop_id = 0
+            if self.pop_sel < self.pop_top:
+                self.pop_top = self.pop_sel
+            if self.pop_sel >= self.pop_top + rows:
+                self.pop_top = self.pop_sel - rows + 1
+        if self._over(r) and self.wheel != 0:
+            self.pop_top = max(0, min(self.pop_top - self.wheel, n - rows))
+            self.wheel = 0
+        self.c.fill_round_rect(r.x + 1, r.y + 3, r.w, r.h, self.th.radius, self.th.shadow)
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, self.th.field)
+        self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, self.th.border)
+        for i in 0..rows:
+            let idx = self.pop_top + i
+            let ir = Rect(r.x + 4, r.y + 4 + i * 26, r.w - 8, 26)
+            let over = self._over(ir)
+            var fg = self.th.fg
+            if over or idx == self.pop_sel:
+                var bg = self.th.select
+                if not over:
+                    bg = gfx.mix(self.th.select, self.th.field, 0.4)
+                self.c.fill_round_rect(ir.x, ir.y, ir.w, ir.h, 4, bg)
+                fg = self.th.select_fg
+            if over:
+                self.want_cursor = gfx.CURSOR_HAND
+                if self.m_released and not self.pop_fresh:
+                    pick = idx
+            self.c.text(ir.x + 8, ir.y + (ir.h - gfx.font_height(FONT)) / 2, self.pop_items[idx], fg, FONT)
+        if n > rows:
+            let th_h = max(16, (r.h - 8) * rows / n)
+            let ty = r.y + 4 + (r.h - 8 - th_h) * self.pop_top / (n - rows)
+            self.c.fill_round_rect(r.x + r.w - 6, ty, 3, th_h, 1, self.th.border)
+        if self.m_pressed:
+            if self._over(r):
+                self.press_taken = true
+            elif not self.pop_fresh:
+                self.pop_id = 0
+        if pick >= 0:
+            self.pick_id = self.pop_id
+            self.pick = pick
+            self.focus = self.pop_id
+            self.pop_id = 0
+            self.dirty = max(self.dirty, 2)
+        if self.pop_id == 0:
+            self.dirty = max(self.dirty, 1)
+        self.pop_fresh = false
+
+    # A list showing `rows` items at a time; `sel` is the selected index (-1 for none).
+    fn listbox(mut self, label: &str, items: &list[str], sel: &mut int, rows: int) -> bool:
+        let id = self._id(label)
+        let ih = 24
+        let r = self._slot(FIELD_W, rows * ih + 4, true)
+        let f = self._interact(id, r, true)
+        let n = len(items)
+        var top = self.scrolls.get_or(id, 0)
+        var ns = sel
+        var follow = false
+        if (f & 1) != 0 and self.wheel != 0:
+            top -= self.wheel
+            self.wheel = 0
+        if (f & 2) != 0:
+            let idx = top + (self.my - r.y - 2) / ih
+            if idx >= 0 and idx < n:
+                ns = idx
+        if self.focus == id and n > 0:
+            for ki in 0..len(self.keys):
+                let k = self.keys[ki]
+                follow = true
+                if k == gfx.KEY_DOWN:
+                    ns = min(n - 1, ns + 1)
+                elif k == gfx.KEY_UP:
+                    ns = max(0, ns - 1)
+                elif k == gfx.KEY_HOME:
+                    ns = 0
+                elif k == gfx.KEY_END:
+                    ns = n - 1
+                elif k == gfx.KEY_PAGE_DOWN:
+                    ns = min(n - 1, ns + rows)
+                elif k == gfx.KEY_PAGE_UP:
+                    ns = max(0, ns - rows)
+                else:
+                    follow = false
+        if follow and ns >= 0:
+            if ns < top:
+                top = ns
+            if ns >= top + rows:
+                top = ns - rows + 1
+        top = max(0, min(top, n - rows))
+        self.scrolls[id] = top
+        let changed = ns != sel
+        sel = ns
+        self.c.fill_round_rect(r.x, r.y, r.w, r.h, self.th.radius, self.th.field)
+        var bd = self.th.border
+        if self.focus == id:
+            bd = self.th.focus
+        self.c.round_rect(r.x, r.y, r.w, r.h, self.th.radius, 1, bd)
+        self._push_clip(r.inset(2))
+        var sw = 0
+        if n > rows:
+            sw = 8
+        for i in 0..min(rows, n - top):
+            let idx = top + i
+            let ir = Rect(r.x + 2, r.y + 2 + i * ih, r.w - 4 - sw, ih)
+            var fg = self._fg()
+            if idx == ns:
+                var bg = self.th.select
+                if self.focus != id:
+                    bg = gfx.mix(self.th.select, self.th.field, 0.4)
+                self.c.fill_round_rect(ir.x, ir.y, ir.w, ir.h, 4, bg)
+                fg = self.th.select_fg
+            elif self._over(ir):
+                self.c.fill_round_rect(ir.x, ir.y, ir.w, ir.h, 4, self.th.button_hover)
+            self.c.text(ir.x + 8, ir.y + (ih - gfx.font_height(FONT)) / 2, items[idx], fg, FONT)
+        self._pop_clip()
+        if n > rows:
+            let th_h = max(16, (r.h - 8) * rows / n)
+            let ty = r.y + 4 + (r.h - 8 - th_h) * top / (n - rows)
+            self.c.fill_round_rect(r.x + r.w - 7, ty, 4, th_h, 2, self.th.border)
+        return changed
+
+    # A row of tabs; `cur` is the selected one. Draw the page's widgets after it.
+    fn tabs(mut self, names: &list[str], cur: &mut int) -> bool:
+        let p = self._peek()
+        let r = self._slot(p.w, 32, true)
+        var changed = false
+        var x = r.x
+        self.c.fill_rect(r.x, r.y + r.h - 1, r.w, 1, self.th.border)
+        for i in 0..len(names):
+            let w = gfx.text_width(names[i], FONT) + 28
+            let tr = Rect(x, r.y, w, r.h)
+            let id = self._id(f"tab:{names[i]}")
+            let f = self._interact(id, tr, true)
+            if (f & 1) != 0:
+                self.want_cursor = gfx.CURSOR_HAND
+            if ((f & 2) != 0 or self._activate_key(id)) and cur != i:
+                cur = i
+                changed = true
+            if self.focus == id:
+                if self._key(gfx.KEY_RIGHT) and i + 1 < len(names) and not changed:
+                    cur = i + 1
+                    changed = true
+                elif self._key(gfx.KEY_LEFT) and i > 0 and not changed:
+                    cur = i - 1
+                    changed = true
+            var fg = self.th.dim
+            if i == cur:
+                fg = self._fg()
+                self.c.fill_rect(tr.x + 4, tr.y + tr.h - 3, tr.w - 8, 3, self.th.accent)
+            elif (f & 1) != 0:
+                fg = self._fg()
+                self.c.fill_round_rect(tr.x + 2, tr.y + 2, tr.w - 4, tr.h - 7, 4, self.th.button_hover)
+            self.c.text_centered(tr.x, tr.y, tr.w, tr.h - 3, names[i], fg, FONT)
+            self._focus_ring(Rect(tr.x + 2, tr.y + 2, tr.w - 4, tr.h - 7), id)
+            x += w
+        if changed:
+            self.dirty = max(self.dirty, 1)
+        return changed
+
+# ---- constructor ----
+
+# Opens a window and returns its app.
+fn app(title: str, w: int, h: int) -> App:
+    let win = gfx.open(title, w, h)
+    let c = win.canvas()
+    return App(win, c, light(), true, false, 1, 0, -1, -1, false, false, false, 0, false, 0,
+               [], [], [], false, Rect(0, 0, 0, 0), [], 0, 0, false, 0, 0, 0, [],
+               gfx.CURSOR_ARROW, gfx.CURSOR_ARROW, true, 0, [], [], [], {}, {}, {}, {}, {}, 0,
+               0, Rect(0, 0, 0, 0), [], 0, 0, false, 0, 0, "", 0, Rect(0, 0, 0, 0), 0, 0)
+
+# ---- helpers ----
+
+fn _f(i: int) -> f64:
+    return i as f64
+
+# The visible part of a label: everything before "##".
+fn _shown(label: &str) -> str:
+    match label.find("##"):
+        case Some(i):
+            return label[:i].clone()
+        case None:
+            return label.clone()
+
+# Splits text into lines no wider than `w` pixels.
+fn _wrap(s: &str, font: int, w: int) -> list[str]:
+    var out: list[str] = []
+    for para in s.split("\n"):
+        var line = ""
+        for word in para.split(" "):
+            if line == "":
+                line = word.clone()
+                continue
+            let cand = line + " " + word
+            if gfx.text_width(cand, font) > w:
+                out.push(line)
+                line = word.clone()
+            else:
+                line = cand
+        out.push(line)
+    return out
+
+# ---- text editing helpers (byte offsets, kept on UTF-8 boundaries) ----
+
+fn _is_cont(b: u8) -> bool:
+    return (b & 0xC0) == 0x80
+
+fn _is_word(b: u8) -> bool:
+    if b >= 0x80 or b == 95:
+        return true
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+
+fn _prev(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    var j = i - 1
+    while j > 0 and _is_cont(bs[j]):
+        j -= 1
+    return max(j, 0)
+
+fn _next(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    let n = len(bs)
+    var j = i + 1
+    while j < n and _is_cont(bs[j]):
+        j += 1
+    return min(j, n)
+
+fn _word_left(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    var j = i
+    while j > 0 and not _is_word(bs[j - 1]):
+        j -= 1
+    while j > 0 and _is_word(bs[j - 1]):
+        j -= 1
+    return j
+
+fn _word_right(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    let n = len(bs)
+    var j = i
+    while j < n and not _is_word(bs[j]):
+        j += 1
+    while j < n and _is_word(bs[j]):
+        j += 1
+    return j
+
+fn _word_start(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    var j = i
+    while j > 0 and _is_word(bs[j - 1]):
+        j -= 1
+    return j
+
+fn _word_end(s: &str, i: int) -> int:
+    let bs = s.bytes()
+    let n = len(bs)
+    var j = i
+    while j < n and _is_word(bs[j]):
+        j += 1
+    return j
+
+# What a field shows: the text, or one '*' per character.
+fn _mask(s: &str, secret: bool) -> str:
+    if not secret:
+        return s.clone()
+    var out = ""
+    for b in s.bytes():
+        if not _is_cont(b):
+            out = out + "*"
+    return out
+
+# Byte offset `i` of `s` as an offset into _mask(s, secret).
+fn _disp_index(s: &str, secret: bool, i: int) -> int:
+    if not secret:
+        return i
+    let bs = s.bytes()
+    var n = 0
+    for j in 0..i:
+        if not _is_cont(bs[j]):
+            n += 1
+    return n
+
+# The byte offset in `s` nearest to pixel `x` of the displayed text.
+fn _pos_at(s: &str, secret: bool, x: int) -> int:
+    if not secret:
+        return gfx.text_index(s, FONT, x)
+    let k = gfx.text_index(_mask(s, true), FONT, x)
+    let bs = s.bytes()
+    var n = 0
+    for j in 0..len(bs):
+        if not _is_cont(bs[j]):
+            if n == k:
+                return j
+            n += 1
+    return len(bs)

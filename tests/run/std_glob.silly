@@ -1,0 +1,62 @@
+# glob: fnmatch, translate, glob with ** and hidden files (checked against Python)
+
+import glob
+import os
+import re
+fn main():
+    for (n, p) in [("abc", "a*"), ("abc", "a?c"), ("abc", "*c*"), ("a/c", "a*c"), ("abc", "[a-c]bc"), ("dbc", "[!a-c]bc"), ("]", "[]]"), ("a]", "[!]]]"), ("[", "["), ("[x", "[x"), ("", "*"), ("aXbXc", "*X*X*"), ("aaab", "a*a*b"), ("ab", "a**?b"), ("-", "[a-]"), (".x", "*"), ("abc", "ABC")]:
+        print(n, p, glob.fnmatch(&n, &p), glob.translate(&p))
+    print(glob.filter(&["a.c", "b.h", "c.c"], &"*.c"), glob.escape(&"a*b?[c]"), glob.has_magic(&"a[b"))
+    let tmp = os.mkdtemp("globtest").unwrap()
+    os.chdir(tmp.clone()).unwrap()
+    for d in ["t/a/b", "t/.h", "t/c"]:
+        os.makedirs(d).unwrap()
+    for f in ["t/x.c", "t/y.h", "t/a/z.c", "t/a/b/w.c", "t/.h/q.c", "t/.dot.c", "t/c/[k].c", "t/a/b/v.txt"]:
+        os.write(f, "").unwrap()
+    for p in ["t/*.c", "t/*", "t/**", "t/**/*.c", "**/*.c", "t/*/", "t/a/b/w.c", "t/nope", "t/.*", "t/c/[[]k].c", "t/**/b", "t//a"]:
+        print(p, glob.glob(&p))
+    print(glob.rglob(&"*.txt"))
+    print(glob.glob(&(tmp + "/t/a/*.c")) == [tmp + "/t/a/z.c"])
+    for (n, p) in [("abc", "*c*"), ("a]", "[!]]]"), ("x.c", "*.[ch]"), ("x.o", "*.[ch]")]:
+        print(re.fullmatch(&glob.translate(&p), &n).is_some() == glob.fnmatch(&n, &p))
+    os.chdir("/").unwrap()
+    os.remove_all(tmp).unwrap()
+    print(os.exists(tmp))
+
+#> abc a* true (?s:a.*)\Z
+#> abc a?c true (?s:a.c)\Z
+#> abc *c* true (?s:.*c.*)\Z
+#> a/c a*c true (?s:a.*c)\Z
+#> abc [a-c]bc true (?s:[a-c]bc)\Z
+#> dbc [!a-c]bc true (?s:[^a-c]bc)\Z
+#> ] []] true (?s:[\]])\Z
+#> a] [!]]] true (?s:[^\]]\])\Z
+#> [ [ true (?s:\[)\Z
+#> [x [x true (?s:\[x)\Z
+#>  * true (?s:.*)\Z
+#> aXbXc *X*X* true (?s:.*X.*X.*)\Z
+#> aaab a*a*b true (?s:a.*a.*b)\Z
+#> ab a**?b false (?s:a.*.b)\Z
+#> - [a-] true (?s:[a-])\Z
+#> .x * true (?s:.*)\Z
+#> abc ABC false (?s:ABC)\Z
+#> ["a.c", "c.c"] a[*]b[?][[]c] true
+#> t/*.c ["t/x.c"]
+#> t/* ["t/a", "t/c", "t/x.c", "t/y.h"]
+#> t/** ["t/", "t/a", "t/a/b", "t/a/b/v.txt", "t/a/b/w.c", "t/a/z.c", "t/c", "t/c/[k].c", "t/x.c", "t/y.h"]
+#> t/**/*.c ["t/a/b/w.c", "t/a/z.c", "t/c/[k].c", "t/x.c"]
+#> **/*.c ["t/a/b/w.c", "t/a/z.c", "t/c/[k].c", "t/x.c"]
+#> t/*/ ["t/a/", "t/c/"]
+#> t/a/b/w.c ["t/a/b/w.c"]
+#> t/nope []
+#> t/.* ["t/.dot.c", "t/.h"]
+#> t/c/[[]k].c ["t/c/[k].c"]
+#> t/**/b ["t/a/b"]
+#> t//a ["t/a"]
+#> ["t/a/b/v.txt"]
+#> true
+#> true
+#> true
+#> true
+#> true
+#> false

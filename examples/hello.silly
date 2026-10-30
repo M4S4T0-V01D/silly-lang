@@ -1,0 +1,4 @@
+# The smallest Silly program.
+fn main():
+    let name = "world"
+    print(f"hello, {name}!")

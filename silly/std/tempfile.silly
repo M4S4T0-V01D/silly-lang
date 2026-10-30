@@ -1,0 +1,77 @@
+# Temporary files and directories, like Python's tempfile.
+#
+#     import tempfile
+#     fn main():
+#         let f = tempfile.mkstemp("data-", ".csv").unwrap()     # /tmp/data-1f3a...csv
+#         let n = tempfile.with_tempdir("build-", fn(dir) => count_files(dir)).unwrap()
+#
+# Names are random (64 bits from the OS), under gettempdir() ($TMPDIR or /tmp)
+# unless a directory is given. Files and directories made here are only readable
+# by you. Nothing is removed automatically, except by with_tempdir.
+
+import os
+import path
+import random
+
+# The directory temporary files go in.
+fn gettempdir() -> str:
+    return os.tmpdir()
+
+fn _name(prefix: &str, suffix: &str) -> str:
+    let digits = "0123456789abcdef"
+    var r = random.os_u64()
+    var s = ""
+    for _ in 0..16:
+        s += digits[r & 15:(r & 15) + 1]
+        r = r >> 4
+    return prefix + s + suffix
+
+# A path under dir (or gettempdir() if dir is "") that doesn't exist yet. Nothing
+# is created, so another program could take the name first; prefer mkstemp.
+fn mktemp(prefix: &str, suffix: &str, dir: &str) -> str:
+    let d = gettempdir() if dir == "" else dir.clone()
+    while true:
+        let p = path.join(d.clone(), _name(prefix, suffix))
+        if not os.exists(p.clone()) and not os.is_link(p.clone()):
+            return p
+    return ""
+
+# Creates a new, empty file in gettempdir() and returns its path.
+fn mkstemp(prefix: str, suffix: str) -> Result[str, str]:
+    return mkstemp_in(&gettempdir(), prefix, suffix)
+
+# Creates a new, empty file in dir and returns its path.
+fn mkstemp_in(dir: &str, prefix: str, suffix: str) -> Result[str, str]:
+    let p = mktemp(&prefix, &suffix, dir)
+    os.write(p.clone(), "")?
+    os.chmod(p.clone(), 0o600)?
+    return Ok(p)
+
+# Like mkstemp, with the given contents.
+fn write_temp(prefix: str, suffix: str, data: str) -> Result[str, str]:
+    let p = mkstemp(prefix, suffix)?
+    os.write(p.clone(), data)?
+    return Ok(p)
+
+# Creates a new, empty directory in gettempdir() and returns its path.
+fn mkdtemp(prefix: str) -> Result[str, str]:
+    return os.mkdtemp(prefix)
+
+# Creates a new, empty directory in dir and returns its path.
+fn mkdtemp_in(dir: &str, prefix: str) -> Result[str, str]:
+    while true:
+        let p = path.join(dir.clone(), _name(&prefix, &""))
+        if os.exists(p.clone()) or os.is_link(p.clone()):
+            continue
+        os.mkdir(p.clone())?
+        os.chmod(p.clone(), 0o700)?
+        return Ok(p)
+    return Err("unreachable")
+
+# Makes a temporary directory, calls f with its path, then removes the
+# directory and everything in it, and returns what f returned.
+fn with_tempdir[T](prefix: str, f: fn(str) -> T) -> Result[T, str]:
+    let d = os.mkdtemp(prefix)?
+    let v = f(d.clone())
+    os.remove_all(d)?
+    return Ok(v)

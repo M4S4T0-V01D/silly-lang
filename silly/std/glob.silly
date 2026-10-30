@@ -1,0 +1,267 @@
+# Shell-style wildcards: matching names (Python's fnmatch) and finding files
+# (Python's glob).
+#
+#     import glob
+#     fn main():
+#         print(glob.fnmatch("main.silly", "*.silly"))       # true
+#         print(glob.filter(&["a.c", "b.h", "c.c"], "*.c"))  # ["a.c", "c.c"]
+#         for p in glob.glob("src/**/*.silly"):
+#             print(p)
+#
+# Patterns: * matches any run of characters, ? any one, [abc] or [a-z] one of a
+# set, [!abc] one not in it. To match a wildcard literally, put it in brackets
+# ([*]). Matching is case-sensitive. In glob(), wildcards never match "/", a
+# name starting with "." is only found by a pattern part starting with ".", and
+# a part that is just ** matches any number of directories (zero or more).
+
+import os
+
+# Whether the whole name matches the pattern.
+fn fnmatch(name: &str, pattern: &str) -> bool:
+    return _match(&name.chars(), &pattern.chars(), false)
+
+# The names that match.
+fn filter(names: &list[str], pattern: &str) -> list[str]:
+    let p = pattern.chars()
+    var out: list[str] = []
+    for n in names:
+        if _match(&n.chars(), &p, false):
+            out.push(n.clone())
+    return out
+
+# Whether a string has any wildcard characters.
+fn has_magic(s: &str) -> bool:
+    for c in s.chars():
+        if c == '*' or c == '?' or c == '[':
+            return true
+    return false
+
+# The pattern that matches s literally.
+fn escape(s: &str) -> str:
+    var out = ""
+    for c in s.chars():
+        if c == '*' or c == '?' or c == '[':
+            out += "[" + str(c) + "]"
+        else:
+            out += str(c)
+    return out
+
+# The pattern as an equivalent regular expression, for the re module.
+fn translate(pattern: &str) -> str:
+    let p = pattern.chars()
+    var out = "(?s:"
+    var i = 0
+    while i < len(p):
+        let c = p[i]
+        i += 1
+        if c == '*':
+            out += ".*"
+            while i < len(p) and p[i] == '*':
+                i += 1
+        elif c == '?':
+            out += "."
+        elif c == '[':
+            let end = _set_end(&p, i)
+            if end < 0:
+                out += "\\["
+            else:
+                var body = ""
+                var j = i
+                if p[j] == '!':
+                    body = "^"
+                    j += 1
+                while j < end:
+                    if p[j] == '\\' or p[j] == '^' or p[j] == '[' or p[j] == ']':
+                        body += "\\"
+                    body += str(p[j])
+                    j += 1
+                out += "[" + body + "]"
+                i = end + 1
+        else:
+            let cs = str(c)
+            if ".^$+{}()|\\]".contains(cs):
+                out += "\\"
+            out += cs
+    return out + ")\\Z"
+
+# Where the set starting after '[' at i ends (the index of its ']'), or -1.
+# A ']' right after '[' or '[!' belongs to the set.
+fn _set_end(p: &list[char], at: int) -> int:
+    var j = at
+    if j < len(p) and p[j] == '!':
+        j += 1
+    if j < len(p) and p[j] == ']':
+        j += 1
+    while j < len(p) and p[j] != ']':
+        j += 1
+    return j if j < len(p) else -1
+
+# Whether c is in the set p[at..end] (the part after '[').
+fn _in_set(c: char, p: &list[char], at: int, end: int) -> bool:
+    var j = at
+    var neg = false
+    if p[j] == '!':
+        neg = true
+        j += 1
+    var hit = false
+    while j < end:
+        if j + 2 < end and p[j + 1] == '-':
+            if p[j] <= c and c <= p[j + 2]:
+                hit = true
+            j += 3
+        else:
+            if p[j] == c:
+                hit = true
+            j += 1
+    return hit != neg
+
+# Matches with backtracking to the last '*' only, so it runs in linear-ish time.
+# With path set, wildcards don't cross '/'.
+fn _match(s: &list[char], p: &list[char], path: bool) -> bool:
+    var si = 0
+    var pi = 0
+    var star_p = -1
+    var star_s = 0
+    while si < len(s):
+        if pi < len(p):
+            let c = p[pi]
+            if c == '*':
+                while pi < len(p) and p[pi] == '*':
+                    pi += 1
+                star_p = pi
+                star_s = si
+                continue
+            if c == '?' and not (path and s[si] == '/'):
+                si += 1
+                pi += 1
+                continue
+            if c == '[':
+                let end = _set_end(p, pi + 1)
+                if end >= 0:
+                    if _in_set(s[si], p, pi + 1, end) and not (path and s[si] == '/'):
+                        si += 1
+                        pi = end + 1
+                        continue
+                elif s[si] == '[':
+                    si += 1
+                    pi += 1
+                    continue
+            elif c != '?' and c == s[si]:
+                si += 1
+                pi += 1
+                continue
+        # Mismatch: let the last star take one more character.
+        if star_p < 0 or (path and s[star_s] == '/'):
+            return false
+        star_s += 1
+        si = star_s
+        pi = star_p
+    while pi < len(p) and p[pi] == '*':
+        pi += 1
+    return pi == len(p)
+
+# ---- finding files ----
+
+# The paths matching a pattern, sorted. A relative pattern is searched from the
+# current directory and gives relative paths. A pattern with no wildcards gives
+# itself if the path exists.
+fn glob(pattern: &str) -> list[str]:
+    if pattern == "":
+        return []
+    var parts = pattern.split("/")
+    var base = ""
+    var start = 0
+    if pattern.starts_with("/"):
+        base = "/"
+        start = 1
+    var found: list[str] = []
+    _glob(&base, &parts, start, &mut found)
+    # ** can reach a path more than once ("a/**/**/b").
+    var seen: map[str, bool] = {}
+    var out: list[str] = []
+    for f in found:
+        if not seen.contains(f):
+            seen[f.clone()] = true
+            out.push(f.clone())
+    out.sort()
+    return out
+
+# Like glob, but every part of the pattern may also match below any directory:
+# rglob("*.c") finds .c files at any depth.
+fn rglob(pattern: &str) -> list[str]:
+    return glob(&("**/" + pattern))
+
+fn _join(base: &str, name: &str) -> str:
+    if base == "":
+        return name.clone()
+    if base.ends_with("/"):
+        return base + name
+    return base + "/" + name
+
+fn _hidden_ok(name: &str, part: &str) -> bool:
+    return not name.starts_with(".") or part.starts_with(".")
+
+fn _glob(base: &str, parts: &list[str], i: int, out: &mut list[str]):
+    if i == len(parts):
+        if base != "" and os.exists(base.clone()):
+            out.push(base.clone())
+        return
+    let part = parts[i].clone()
+    let last = i == len(parts) - 1
+    if part == "":
+        # "a//b" or a trailing "/": a trailing slash matches only directories.
+        if last:
+            if os.is_dir(base.clone()):
+                out.push(base + "/")
+            return
+        _glob(base, parts, i + 1, &mut out)
+        return
+    let dir = "." if base == "" else base.clone()
+    if part == "**":
+        # Zero directories, then each directory below, at any depth.
+        if last:
+            # Like Python: the directory itself (as "dir/"), then everything below.
+            if base != "":
+                out.push(base + ("" if base.ends_with("/") else "/"))
+            for d in _below(&dir, &base, false):
+                out.push(d.clone())
+            return
+        _glob(base, parts, i + 1, &mut out)
+        for d in _below(&dir, &base, true):
+            _glob(&d, parts, i + 1, &mut out)
+        return
+    if not has_magic(&part):
+        let p = _join(base, &part)
+        if last:
+            if os.exists(p.clone()) or os.is_link(p.clone()):
+                out.push(p)
+        elif os.is_dir(p.clone()):
+            _glob(&p, parts, i + 1, &mut out)
+        return
+    let names = os.listdir(dir).unwrap_or([])
+    let pc = part.chars()
+    for n in names:
+        if not _hidden_ok(&n, &part) or not _match(&n.chars(), &pc, true):
+            continue
+        let p = _join(base, &n)
+        if last:
+            out.push(p)
+        elif os.is_dir(p.clone()):
+            _glob(&p, parts, i + 1, &mut out)
+
+# Every directory under dir (or every entry, unless dirs_only), skipping hidden
+# names and not following links to directories, as paths under base.
+fn _below(dir: &str, base: &str, dirs_only: bool) -> list[str]:
+    var out: list[str] = []
+    for n in os.listdir(dir.clone()).unwrap_or([]):
+        if n.starts_with("."):
+            continue
+        let full = _join(dir, &n)
+        let p = _join(base, &n)
+        let is_dir = os.is_dir(full.clone())
+        if is_dir or not dirs_only:
+            out.push(p.clone())
+        if is_dir and not os.is_link(full.clone()):
+            for d in _below(&full, &p, dirs_only):
+                out.push(d.clone())
+    return out

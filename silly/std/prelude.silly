@@ -1,0 +1,171 @@
+# The prelude is imported into every module automatically.
+
+@export_variants
+enum Option[T]:
+    Some(T)
+    None
+
+    fn is_some(self) -> bool:
+        return self is Some(_)
+
+    fn is_none(self) -> bool:
+        return self is None
+
+    @consuming
+    fn unwrap(self) -> T:
+        match self:
+            case Some(v): return v
+            case None: panic("called unwrap() on a None value")
+
+    @consuming
+    fn expect(self, msg: str) -> T:
+        match self:
+            case Some(v): return v
+            case None: panic(msg)
+
+    @consuming
+    fn unwrap_or(self, default: T) -> T:
+        match self:
+            case Some(v): return v
+            case None: return default
+
+    @consuming
+    fn map[U](self, f: fn(T) -> U) -> Option[U]:
+        match self:
+            case Some(v): return Some(f(v))
+            case None: return None
+
+    @consuming
+    fn ok_or[E](self, err: E) -> Result[T, E]:
+        match self:
+            case Some(v): return Ok(v)
+            case None: return Err(err)
+
+
+@export_variants
+enum Result[T, E]:
+    Ok(T)
+    Err(E)
+
+    fn is_ok(self) -> bool:
+        return self is Ok(_)
+
+    fn is_err(self) -> bool:
+        return self is Err(_)
+
+    @consuming
+    fn unwrap(self) -> T:
+        match self:
+            case Ok(v): return v
+            case Err(e): panic(f"called unwrap() on an Err value: {e}")
+
+    @consuming
+    fn expect(self, msg: str) -> T:
+        match self:
+            case Ok(v): return v
+            case Err(e): panic(f"{msg}: {e}")
+
+    @consuming
+    fn unwrap_or(self, default: T) -> T:
+        match self:
+            case Ok(v): return v
+            case Err(_): return default
+
+    @consuming
+    fn unwrap_err(self) -> E:
+        match self:
+            case Ok(_): panic("called unwrap_err() on an Ok value")
+            case Err(e): return e
+
+    @consuming
+    fn ok(self) -> Option[T]:
+        match self:
+            case Ok(v): return Some(v)
+            case Err(_): return None
+
+
+# ---- closure-taking list methods: xs.map(f) calls __list_map(&xs, f) ----
+# Under @views, a lambda passed for `f` gets each element as a read-only
+# borrowed view (as a `for` loop does), so nothing is copied or moved.
+
+@views
+fn __list_map[T, U](xs: &list[T], f: fn(T) -> U) -> list[U]:
+    var out: list[U] = []
+    for x in xs:
+        out.push(f(x))
+    return out
+
+@views
+fn __list_filter[T](xs: &list[T], f: fn(T) -> bool) -> list[T]:
+    var out: list[T] = []
+    for x in xs:
+        if f(x):
+            out.push(x.clone())
+    return out
+
+@views
+fn __list_any[T](xs: &list[T], f: fn(T) -> bool) -> bool:
+    for x in xs:
+        if f(x):
+            return true
+    return false
+
+@views
+fn __list_all[T](xs: &list[T], f: fn(T) -> bool) -> bool:
+    for x in xs:
+        if not f(x):
+            return false
+    return true
+
+@views
+fn __list_count_by[T](xs: &list[T], f: fn(T) -> bool) -> int:
+    var n = 0
+    for x in xs:
+        if f(x):
+            n += 1
+    return n
+
+@views
+fn __list_position[T](xs: &list[T], f: fn(T) -> bool) -> Option[int]:
+    for i, x in enumerate(xs):
+        if f(x):
+            return Some(i)
+    return None
+
+@views
+fn __list_each[T](xs: &list[T], f: fn(T)):
+    for x in xs:
+        f(x)
+
+@views
+fn __list_fold[T, A](xs: &list[T], init: A, f: fn(A, T) -> A) -> A:
+    var acc = init
+    for x in xs:
+        acc = f(acc, x)
+    return acc
+
+@views
+fn __list_sort_by[T, K](xs: &mut list[T], f: fn(T) -> K):
+    # Stable: sort (key, index) pairs, then apply the permutation with swaps.
+    var keyed: list[(K, int)] = []
+    for i, x in enumerate(xs):
+        keyed.push((f(x), i))
+    keyed.sort()
+    let n = len(keyed)
+    var perm: list[int] = []
+    for _, i in keyed:
+        perm.push(i)
+    var seen: list[bool] = []
+    for _ in 0..n:
+        seen.push(false)
+    for s in 0..n:
+        if seen[s]:
+            continue
+        var i = s
+        loop:
+            seen[i] = true
+            let j = perm[i]
+            if j == s:
+                break
+            xs.swap(i, j)
+            i = j

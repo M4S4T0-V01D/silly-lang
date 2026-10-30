@@ -1,0 +1,5 @@
+# error: while it is being iterated
+fn main():
+    var m = {1: 2}
+    for k in m:
+        m[k + 1] = 0

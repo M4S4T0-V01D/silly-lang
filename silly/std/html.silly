@@ -1,0 +1,143 @@
+# Escaping text for HTML, like Python's html.
+#
+#     import html
+#     fn main():
+#         print(html.escape(&"<a href=\"x\">Tom & Jerry</a>"))
+#         # &lt;a href=&quot;x&quot;&gt;Tom &amp; Jerry&lt;/a&gt;
+#         print(html.unescape(&"&lt;p&gt; caf&eacute; &#169; &#x1F600;"))   # <p> café © 😀
+#         print(html.strip_tags(&"<b>bold</b> text"))                       # bold text
+
+# Replaces & < > " and ' with entities, so the text is safe in an element or a
+# quoted attribute.
+fn escape(s: &str) -> str:
+    var out = ""
+    for c in s.chars():
+        if c == '&':
+            out += "&amp;"
+        elif c == '<':
+            out += "&lt;"
+        elif c == '>':
+            out += "&gt;"
+        elif c == '"':
+            out += "&quot;"
+        elif c == '\'':
+            out += "&#x27;"
+        else:
+            out += str(c)
+    return out
+
+# Like escape, but leaves quotes alone (for text between tags).
+fn escape_text(s: &str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+# The common named entities (all of HTML 4's Latin-1 set is too many to carry;
+# these are the ones seen in practice).
+fn _named(name: &str) -> int:
+    let names = ["amp", "lt", "gt", "quot", "apos", "nbsp", "copy", "reg", "trade", "hellip",
+                 "mdash", "ndash", "lsquo", "rsquo", "ldquo", "rdquo", "laquo", "raquo", "bull",
+                 "middot", "deg", "plusmn", "times", "divide", "micro", "para", "sect", "cent",
+                 "pound", "euro", "yen", "iexcl", "iquest", "shy", "frac12", "frac14", "frac34",
+                 "sup1", "sup2", "sup3", "larr", "rarr", "uarr", "darr", "harr", "hearts", "check",
+                 "agrave", "aacute", "acirc", "atilde", "auml", "aring", "aelig", "ccedil",
+                 "egrave", "eacute", "ecirc", "euml", "igrave", "iacute", "icirc", "iuml",
+                 "ntilde", "ograve", "oacute", "ocirc", "otilde", "ouml", "oslash", "ugrave",
+                 "uacute", "ucirc", "uuml", "yacute", "yuml", "szlig",
+                 "Agrave", "Aacute", "Acirc", "Atilde", "Auml", "Aring", "AElig", "Ccedil",
+                 "Egrave", "Eacute", "Ecirc", "Euml", "Igrave", "Iacute", "Icirc", "Iuml",
+                 "Ntilde", "Ograve", "Oacute", "Ocirc", "Otilde", "Ouml", "Oslash", "Ugrave",
+                 "Uacute", "Ucirc", "Uuml", "Yacute",
+                 "alpha", "beta", "gamma", "delta", "epsilon", "lambda", "mu", "pi", "sigma",
+                 "omega", "Delta", "Sigma", "Omega", "infin", "ne", "le", "ge", "asymp", "sum"]
+    let codes = [38, 60, 62, 34, 39, 160, 169, 174, 8482, 8230,
+                 8212, 8211, 8216, 8217, 8220, 8221, 171, 187, 8226,
+                 183, 176, 177, 215, 247, 181, 182, 167, 162,
+                 163, 8364, 165, 161, 191, 173, 189, 188, 190,
+                 185, 178, 179, 8592, 8594, 8593, 8595, 8596, 9829, 10003,
+                 224, 225, 226, 227, 228, 229, 230, 231,
+                 232, 233, 234, 235, 236, 237, 238, 239,
+                 241, 242, 243, 244, 245, 246, 248, 249,
+                 250, 251, 252, 253, 255, 223,
+                 192, 193, 194, 195, 196, 197, 198, 199,
+                 200, 201, 202, 203, 204, 205, 206, 207,
+                 209, 210, 211, 212, 213, 214, 216, 217,
+                 218, 219, 220, 221,
+                 945, 946, 947, 948, 949, 955, 956, 960, 963,
+                 969, 916, 931, 937, 8734, 8800, 8804, 8805, 8776, 8721]
+    for i in 0..len(names):
+        if names[i] == name:
+            return codes[i]
+    return -1
+
+fn _num(digits: &str, base: int) -> int:
+    if digits == "" or len(digits) > 8:
+        return -1
+    var v = 0
+    for c in digits.lower().chars():
+        let d = "0123456789abcdef".find(str(c))
+        if d.is_none() or d.unwrap() >= base:
+            return -1
+        v = v * base + d.unwrap()
+    return v
+
+# Replaces entities (&amp; &#169; &#xA9; and the common named ones) with the
+# characters they stand for. The closing ";" is required. Unknown or broken
+# entities are left as they are.
+# Numeric ones that aren't valid characters become U+FFFD.
+fn unescape(s: &str) -> str:
+    if not s.contains("&"):
+        return s.clone()
+    var out = ""
+    var rest = s.clone()
+    while true:
+        let amp = rest.find("&")
+        if amp.is_none():
+            break
+        out += rest[0:amp.unwrap()]
+        rest = rest[amp.unwrap():]
+        let semi = rest.find(";")
+        if semi.is_none() or semi.unwrap() > 33:
+            out += "&"
+            rest = rest[1:]
+            continue
+        let body = rest[1:semi.unwrap()]
+        var code = -1
+        if body.starts_with("#x") or body.starts_with("#X"):
+            code = _num(&body[2:], 16)
+            if code == 0 or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF):
+                code = 0xFFFD
+        elif body.starts_with("#"):
+            code = _num(&body[1:], 10)
+            if code == 0 or code > 0x10FFFF or (code >= 0xD800 and code <= 0xDFFF):
+                code = 0xFFFD
+        else:
+            code = _named(&body)
+        if code < 0:
+            out += "&"
+            rest = rest[1:]
+            continue
+        out += str(chr(code))
+        rest = rest[semi.unwrap() + 1:]
+    return out + rest
+
+# The text with <tags> and <!-- comments --> removed and entities decoded.
+fn strip_tags(s: &str) -> str:
+    var out = ""
+    var rest = s.clone()
+    while true:
+        let lt = rest.find("<")
+        if lt.is_none():
+            break
+        out += rest[0:lt.unwrap()]
+        rest = rest[lt.unwrap():]
+        if rest.starts_with("<!--"):
+            let end = rest.find("-->")
+            if end.is_none():
+                rest = ""
+                break
+            rest = rest[end.unwrap() + 3:]
+            continue
+        let gt = rest.find(">")
+        if gt.is_none():
+            break
+        rest = rest[gt.unwrap() + 1:]
+    return unescape(&(out + rest))

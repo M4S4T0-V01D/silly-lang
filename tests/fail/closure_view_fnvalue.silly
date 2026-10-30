@@ -1,0 +1,7 @@
+# error: the list only lends them
+fn id(s: list[int]) -> list[int]:
+    return s
+
+fn main():
+    let w = [[1]]
+    print(w.map(id))

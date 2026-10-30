@@ -1,0 +1,84 @@
+# Running other programs and capturing what they print.
+#
+#     import subprocess
+#     fn main():
+#         let r = subprocess.run("ls -1 /")
+#         if r.ok():
+#             for line in r.stdout.lines():
+#                 print(line)
+#         print(subprocess.output(["echo", "it's quoted"]))
+#
+# Commands given as a string run through /bin/sh; the list forms quote each
+# argument, so spaces and special characters reach the program unchanged.
+
+extern "os.c"
+
+extern fn os_run_capture(cmd: str, input: str, feed: bool) -> int
+extern fn os_run_stdout() -> str
+extern fn os_run_stderr() -> str
+extern fn os_system(cmd: str) -> int
+extern fn os_error() -> str
+
+# What a finished command left behind.
+struct Completed:
+    code: int         # exit status; 128 + n if killed by signal n, -1 if it couldn't start
+    stdout: str
+    stderr: str
+
+    fn ok(self) -> bool:
+        return self.code == 0
+
+    # Ok(stdout) when the command succeeded, otherwise Err with its stderr.
+    fn check(self) -> Result[str, str]:
+        if self.code == 0:
+            return Ok(self.stdout.clone())
+        var msg = self.stderr.trim()
+        if msg == "":
+            return Err(f"command failed with status {self.code}")
+        return Err(f"command failed with status {self.code}: {msg}")
+
+fn _done(code: int) -> Completed:
+    if code < 0:
+        return Completed(-1, "", os_error())
+    return Completed(code, os_run_stdout(), os_run_stderr())
+
+# Quotes a string for the shell: quote("it's") == "'it'\\''s'".
+fn quote(s: &str) -> str:
+    if s == "":
+        return "''"
+    var plain = true
+    for b in s.bytes():
+        let c = b as char
+        if not (c.is_alnum() or c == '_' or c == '-' or c == '.' or c == '/' or c == ':' or c == '=' or c == '+' or c == ','):
+            plain = false
+            break
+    if plain:
+        return s.clone()
+    return "'" + s.replace("'", "'\\''") + "'"
+
+# Joins arguments into one shell command, quoting each.
+fn join(argv: &list[str]) -> str:
+    var parts: list[str] = []
+    for a in argv:
+        parts.push(quote(a))
+    return " ".join(parts)
+
+# Runs a shell command, capturing stdout and stderr.
+fn run(cmd: str) -> Completed:
+    return _done(os_run_capture(cmd, "", false))
+
+# Runs a shell command with `input` on its standard input.
+fn run_input(cmd: str, input: str) -> Completed:
+    return _done(os_run_capture(cmd, input, true))
+
+# Runs a program with arguments (no shell parsing), capturing its output.
+fn run_args(argv: &list[str]) -> Completed:
+    return _done(os_run_capture(join(argv), "", false))
+
+# The stdout of a program with arguments, or Err if it failed.
+fn output(argv: &list[str]) -> Result[str, str]:
+    return run_args(argv).check()
+
+# Runs a shell command on this program's terminal (output is not captured).
+fn call(cmd: str) -> int:
+    return os_system(cmd)

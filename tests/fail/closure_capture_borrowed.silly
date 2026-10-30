@@ -1,0 +1,7 @@
+# error: only borrowed
+fn take(xs: &list[int]) -> int:
+    let f = fn() => len(xs)
+    return f()
+
+fn main():
+    print(take(&[1]))

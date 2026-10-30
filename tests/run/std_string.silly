@@ -1,0 +1,44 @@
+# The string and textwrap modules.
+
+import string
+import textwrap
+fn main():
+    print(string.pad_left("7", 3, '0'), string.pad_right("ab", 4, '.'), string.center("hi", 7, '*'), string.center("hi", 6, '*'), string.center("abc", 6, '*'), string.zfill("-42", 6))
+    print(string.capwords("hello   silly world"), string.title("it's a test-case"), string.swapcase("aBc"), string.capitalize("hELLO"))
+    print(string.partition("key=value=x", "="), string.rpartition("a/b/c", "/"), string.partition("x", "="))
+    print(string.distance("kitten", "sitting"), string.distance("", "abc"), string.reverse("héllo"), string.width("héllo"))
+    print(string.rfind("abcabc", "bc"), string.find_all("aXbXc", "X"), string.splitn("a,b,c,d", ",", 2))
+    print(string.strip_chars("--x-y--", "-"), string.remove_prefix("foobar", "foo"), string.remove_suffix("foobar", "bar"))
+    print(string.is_digits("123"), string.is_digits("1a"), string.is_identifier("_x1"), string.is_identifier("1x"))
+    print(string.translate("hello", "lo", "L"), string.split_whitespace("  a \t b\n c  "))
+    var m: map[str, str] = {}
+    m["name"] = "silly"
+    print(string.substitute("hi {name}, {{x}} {missing}", &m), len(string.ASCII_LETTERS), string.DIGITS)
+    for l in textwrap.wrap("The quick brown fox jumps over the lazy dog", 15):
+        print("|" + l + "|")
+    print(textwrap.wrap("abcdefghij", 4), textwrap.wrap("", 10))
+    print(textwrap.indent("a\n\nb", "> "))
+    print(textwrap.dedent("    x\n      y\n\n    z"))
+    print(textwrap.shorten("Hello  world, this is long", 15), textwrap.shorten("short", 15))
+
+#> 007 ab.. ***hi** **hi** *abc** -00042
+#> Hello Silly World It'S A Test-Case AbC Hello
+#> ("key", "=", "value=x") ("a/b", "/", "c") ("x", "", "")
+#> 3 3 olléh 5
+#> Some(4) [1, 3] ["a", "b", "c,d"]
+#> x-y bar foo
+#> true false true false
+#> heLL ["a", "b", "c"]
+#> hi silly, {x} {missing} 52 0123456789
+#> |The quick brown|
+#> |fox jumps over|
+#> |the lazy dog|
+#> ["abcd", "efgh", "ij"] []
+#> > a
+#>
+#> > b
+#> x
+#>   y
+#>
+#> z
+#> Hello [...] short

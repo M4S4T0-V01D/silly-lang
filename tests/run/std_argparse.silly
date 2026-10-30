@@ -1,0 +1,72 @@
+# argparse: flags, counts, options, choices, positionals, errors, help
+
+import argparse
+
+fn mk() -> argparse.Parser:
+    var p = argparse.Parser.new("wc", "Count lines in files.")
+    p.flag("verbose", "v", "say what is happening")
+    p.count("debug", "d", "more output")
+    p.int_option("width", "w", 80, "column width")
+    p.option("out", "o", "", "output file")
+    p.choice("mode", "", ["lines", "words"], "lines", "what to count")
+    p.append("tag", "t", "add a tag")
+    p.positional("src", "source")
+    p.optional("dst", "x.txt", "destination")
+    p.rest("files", "files to read")
+    return p
+
+fn show(argv: list[str]):
+    let p = mk()
+    match p.parse(&argv):
+        case Ok(a):
+            if a.help_wanted:
+                print("HELP")
+                return
+            print(a.flag("verbose"), a.count("debug"), a.int("width"), a.get("out"), a.get("mode"), a.list("tag"), a.get("src"), a.get("dst"), a.list("files"), a.has("width"))
+        case Err(e): print("ERR", e)
+
+fn main():
+    show(["a"])
+    show(["-vdd", "--width=5", "-ofile", "a", "b", "c", "d"])
+    show(["--wid", "7", "-o", "f", "--mode", "words", "-t", "x", "--tag=y", "a", "--", "-v"])
+    show(["--mode", "chars", "a"])
+    show(["--width", "abc", "a"])
+    show([])
+    show(["-z", "a"])
+    show(["--wi"])
+    show(["--width"])
+    show(["-w", "-3", "a"])
+    show(["--verbose=1", "a"])
+    show(["--he"])
+    print(mk().help())
+
+#> false 0 80  lines [] a x.txt [] false
+#> true 2 5 file lines [] a b ["c", "d"] true
+#> false 0 7 f words ["x", "y"] a -v [] true
+#> ERR argument --mode: invalid choice: 'chars' (choose from 'lines', 'words')
+#> ERR argument -w/--width: invalid int value: 'abc'
+#> ERR the following arguments are required: src
+#> ERR unrecognized arguments: -z
+#> ERR argument -w/--width: expected one argument
+#> ERR argument -w/--width: expected one argument
+#> false 0 -3  lines [] a x.txt [] true
+#> ERR argument -v/--verbose: ignored explicit argument '1'
+#> HELP
+#> usage: wc [-h] [-v] [-d] [-w WIDTH] [-o OUT] [--mode {lines,words}] [-t TAG] src [dst] [files ...]
+#>
+#> Count lines in files.
+#>
+#> positional arguments:
+#>   src                   source
+#>   dst                   destination (default: x.txt)
+#>   files                 files to read
+#>
+#> options:
+#>   -h, --help            show this help message and exit
+#>   -v, --verbose         say what is happening
+#>   -d, --debug           more output
+#>   -w, --width WIDTH     column width (default: 80)
+#>   -o, --out OUT         output file
+#>   --mode {lines,words}  what to count (default: lines)
+#>   -t, --tag TAG         add a tag
+#>

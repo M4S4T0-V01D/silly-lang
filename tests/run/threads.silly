@@ -1,0 +1,81 @@
+# Threads: spawn/join, join_all, results copied back across data stacks, nested tasks.
+#> [2762, 2371, 2260, 2199] 9592
+#> n! 6 ["n1", "n2", "n3"]
+#> inner outer
+#> from a thread
+#> true
+#> ["aaaa#3", "b#3"]
+#> 16
+
+struct Stats:
+    name: str
+    total: int
+    words: list[str]
+
+fn count_primes(lo: int, hi: int) -> int:
+    var n = 0
+    for k in lo..hi:
+        if k < 2:
+            continue
+        var d = 2
+        var prime = true
+        while d * d <= k:
+            if k % d == 0:
+                prime = false
+                break
+            d += 1
+        if prime:
+            n += 1
+    return n
+
+fn summarize(label: str, xs: list[int]) -> Stats:
+    var words: list[str] = []
+    for x in xs:
+        words.push(f"{label}{x}")
+    return Stats(label + "!", sum(xs), words)
+
+fn part1():
+    # Split a range across tasks; each runs on its own data stack.
+    let parts = 4
+    var tasks: list[Task[int]] = []
+    for i in 0..parts:
+        let lo = i * 25000
+        tasks.push(spawn(fn() => count_primes(lo, lo + 25000)))
+    let counts = join_all(tasks)
+    print(counts, sum(counts))
+
+    # Results that own data-stack storage are copied back on join.
+    let xs = [1, 2, 3]
+    let t = spawn(fn() => summarize("n", xs.clone()))
+    let s = t.join()
+    print(s.name, s.total, s.words)
+
+    # Tasks can spawn tasks; a void task.
+    let outer = spawn(fn() => spawn(fn() => "inner").join() + " outer")
+    print(outer.join())
+    let v = spawn(fn() => print("from a thread"))
+    v.join()
+    print(cpu_count() > 0)
+
+
+fn make(id: int, words: list[str]) -> (int, Task[list[str]]):
+    # The closure owns its copy of `words`; the caller's frame ends right after.
+    return (id, spawn(fn() => words.map(fn(w) => f"{w}#{id}")))
+
+fn part2():
+    var jobs: list[(int, Task[list[str]])] = []
+    for i in 0..8:
+        jobs.push(make(i, ["a" * (i + 1), "b"]))
+    var total = 0
+    while jobs.len() > 0:
+        let (id, task) = jobs.pop()
+        let r = task.join()
+        total += r.len()
+        if id == 3:
+            print(r)
+    print(total)
+
+
+fn main():
+    part1()
+    part2()

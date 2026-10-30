@@ -1,0 +1,7 @@
+# Python bytecode
+__pycache__/
+
+# Build output: test binaries, the bootstrap's stages, package checkouts
+tests/.build/
+selfhost/build/
+.silly/

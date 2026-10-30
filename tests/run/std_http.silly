@@ -1,0 +1,114 @@
+# http: client+server over loopback, redirects, JSON, headers, chunked/100-continue/EOF framing, errors
+
+import http
+import json
+import socket
+
+fn handler(req: http.Request) -> http.Response:
+    if req.path == "/":
+        return http.html(&"<h1>hi</h1>")
+    if req.path == "/echo":
+        return http.response(200, &(req.method + " " + req.body + " q=" + req.param(&"q").unwrap_or("-")))
+    if req.path == "/old":
+        return http.redirect(&"/echo?q=moved")
+    if req.path == "/json":
+        return http.json_response(&json.parse(&"{\"a\": [1, 2]}").unwrap())
+    if req.path == "/hdr":
+        return http.response(200, &req.header(&"X-Thing").unwrap_or("none")).with_header(&"X-Back", &"yes")
+    if req.path == "/a b":
+        return http.response(200, &"decoded path")
+    return http.response(404, &"nope\n")
+
+fn run_server(s: http.Server, n: int) -> int:
+    for _ in 0..n:
+        s.handle_one(handler).unwrap()
+    return n
+
+fn raw_server(l: socket.Socket, replies: list[str]) -> int:
+    for r in replies:
+        let c = l.accept().unwrap()
+        var got = ""
+        while not got.contains("\r\n\r\n"):
+            got += c.recv(4096).unwrap()
+        c.send(&r).unwrap()
+        c.close()
+    return len(replies)
+
+fn framing():
+    let l = socket.listen(&"127.0.0.1", 0, 8).unwrap()
+    let base = "http://127.0.0.1:" + str(l.local_port())
+    let replies = [
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n7\r\n, world\r\n0\r\nX-Trailer: t\r\n\r\n",
+        "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok",
+        "HTTP/1.0 200 OK\r\n\r\nuntil the end",
+        "HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n",
+        "HTTP/1.1 299\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort",
+        "garbage\r\n\r\n",
+    ]
+    let t = spawn(fn() => raw_server(l, replies.clone()))
+    let c = http.get(&(base + "/")).unwrap()
+    print(c.status, c.body, c.header(&"transfer-encoding").unwrap())
+    let k = http.get(&(base + "/")).unwrap()
+    print(k.status, k.reason, k.body)
+    let e = http.get(&(base + "/")).unwrap()
+    print(e.status, e.body)
+    let h = http.request(&"HEAD", &(base + "/"), &[], &"").unwrap()
+    print(h.status, h.body == "", h.header(&"content-length").unwrap())
+    let n = http.get(&(base + "/")).unwrap()
+    print(n.status, "[" + n.reason + "]")
+    print(http.get(&(base + "/")).unwrap_err())
+    print(http.get(&(base + "/")).unwrap_err())
+    print(t.join())
+    l.close()
+
+fn main():
+    framing()
+    let s = http.quiet_server(&"127.0.0.1", 0).unwrap()
+    let base = "http://127.0.0.1:" + str(s.port())
+    let t = spawn(fn() => run_server(s, 11))
+    let r = http.get(&(base + "/")).unwrap()
+    print(r.status, r.reason, r.header(&"content-type").unwrap(), r.body, r.ok())
+    let p = http.post(&(base + "/echo?q=1"), &"data=yes", &"text/plain").unwrap()
+    print(p.body)
+    let m = http.get(&(base + "/old")).unwrap()
+    print(m.status, m.body, m.url.ends_with("/echo?q=moved"))
+    let pm = http.post(&(base + "/old"), &"x", &"text/plain").unwrap()
+    print(pm.body)
+    let j = http.get(&(base + "/json")).unwrap()
+    print(json.dump(&j.json().unwrap()))
+    let h = http.request(&"get", &(base + "/hdr"), &[("X-Thing", "abc")], &"").unwrap()
+    print(h.body, h.header(&"x-back").unwrap())
+    print(http.get(&(base + "/a%20b")).unwrap().body)
+    let nf = http.get(&(base + "/missing")).unwrap()
+    print(nf.status, nf.reason, nf.ok(), nf.str())
+    match http.fetch(&(base + "/missing")):
+        case Ok(_): print("unexpected")
+        case Err(e): print(e)
+    print(t.join())
+    s.close()
+    match http.get(&"ftp://x/"):
+        case Ok(_): print("unexpected")
+        case Err(e): print(e)
+    print(http.reason(418))
+
+#> 200 hello, world chunked
+#> 201 Created ok
+#> 200 until the end
+#> 200 true 999
+#> 299 []
+#> connection closed early
+#> bad status line: garbage
+#> 7
+#> 200 OK text/html; charset=utf-8 <h1>hi</h1> true
+#> POST data=yes q=1
+#> 200 GET  q=moved true
+#> GET  q=moved
+#> {"a":[1,2]}
+#> abc yes
+#> decoded path
+#> 404 Not Found false <Response 404 Not Found>
+#> 404 Not Found
+#> 11
+#> unsupported URL: ftp://x/
+#> I'm a teapot

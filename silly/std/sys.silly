@@ -1,0 +1,72 @@
+# The running program: its arguments, standard streams, exit and platform.
+#
+#     import sys
+#     fn main():
+#         let argv = sys.argv()
+#         if len(argv) < 2:
+#             sys.die("usage: tool FILE")
+#         sys.stderr("reading " + argv[1] + "\n")
+
+extern "os.c"
+
+extern fn os_write_err(s: str)
+extern fn os_write_out(s: str)
+extern fn os_flush()
+extern fn os_isatty(fd: int) -> bool
+extern fn os_read_stdin() -> str
+extern fn os_uname(field: int) -> str
+extern fn os_exit(code: int)
+
+const VERSION: str = "0.1.0"
+const MAX_INT: int = 9223372036854775807
+const MIN_INT: int = -9223372036854775807 - 1
+const BYTEORDER: str = "little"
+
+# The command line: argv()[0] is the program, the rest are its arguments.
+fn argv() -> list[str]:
+    return args()
+
+# "linux", "darwin", "freebsd", ... (the lowercased kernel name).
+fn platform() -> str:
+    return os_uname(0).lower()
+
+# Writes to standard output without a newline.
+fn stdout(s: str):
+    os_write_out(s)
+
+# Writes to standard error without a newline.
+fn stderr(s: str):
+    os_write_err(s)
+
+# Writes out anything buffered for stdout.
+fn flush():
+    os_flush()
+
+# Everything left on standard input.
+fn read_stdin() -> str:
+    return os_read_stdin()
+
+# The remaining lines of standard input, without their line endings.
+fn stdin_lines() -> list[str]:
+    var out: list[str] = []
+    while true:
+        match input():
+            case Some(line):
+                out.push(line)
+            case None:
+                break
+    return out
+
+# Whether standard input/output/error (0, 1, 2) is a terminal.
+fn isatty(fd: int) -> bool:
+    return os_isatty(fd)
+
+# Ends the program with a status code.
+fn exit(code: int):
+    os_exit(code)
+
+# Prints a message to standard error and exits with status 1.
+fn die(msg: str):
+    os_flush()
+    os_write_err(msg + "\n")
+    os_exit(1)

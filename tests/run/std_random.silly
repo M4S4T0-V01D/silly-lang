@@ -1,0 +1,37 @@
+# The random module: shared seeded generator and Rng agree; ranges and helpers.
+
+import random
+fn main():
+    random.seed(42)
+    let a = random.randint(1, 100)
+    let f = random.random()
+    var r = random.Rng.new(42)
+    print(a == r.randint(1, 100), f == r.random())
+    var counts = [0, 0, 0, 0, 0, 0]
+    for _ in 0..60000:
+        counts[random.randint(1, 6) - 1] += 1
+    print(counts.all(fn(c) => c > 9000 and c < 11000))
+    var deck = ["A", "K", "Q", "J", "10"]
+    random.shuffle(&mut deck)
+    var sorted = deck.clone()
+    sorted.sort()
+    print(len(deck), sorted)
+    print(deck.contains(random.choice(&deck)), len(random.sample(&deck, 3)))
+    var g = 0.0
+    for _ in 0..10000:
+        g += random.gauss(10.0, 2.0)
+    print((g / 10000.0 - 10.0).abs() < 0.2, len(random.token_hex(8)))
+    var w = [0, 0]
+    for _ in 0..1000:
+        w[random.weighted(&[1.0, 9.0])] += 1
+    print(w[1] > 800, random.randint(-5, -5), random.uniform(2.0, 3.0) >= 2.0)
+    var r2 = random.Rng.new(7)
+    print(r2.randint(1, 1000000), r2.randint(1, 1000000), r2.choice(&[1, 2, 3]))
+
+#> true true
+#> true
+#> 5 ["10", "A", "J", "K", "Q"]
+#> true 3
+#> true 16
+#> true -5 true
+#> 475995 782675 1

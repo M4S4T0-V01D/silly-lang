@@ -1,0 +1,4 @@
+# error: only allowed for
+fn main():
+    var xs = [1]
+    let r: &list[int] = &xs

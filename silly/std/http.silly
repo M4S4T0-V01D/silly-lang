@@ -1,0 +1,493 @@
+# HTTP/1.1 clients and servers, like Python's urllib.request and http.server.
+#
+#     import http
+#     fn main():
+#         let r = http.get(&"http://example.com/").unwrap()
+#         print(r.status, r.reason, r.header(&"content-type").unwrap_or(""))
+#         print(r.body[0:60])
+#
+#     # A server: each request goes to handler, whose Response is sent back.
+#     fn hello(req: http.Request) -> http.Response:
+#         if req.path == "/":
+#             return http.html(&"<h1>Hello</h1>")
+#         return http.response(404, &"no such page\n")
+#
+#     fn serve():
+#         http.serve(&"127.0.0.1", 8000, hello).unwrap()
+#
+# Plain http:// is spoken directly over a socket; https:// goes through the
+# curl program, so it needs curl installed. Redirects are followed (up to 5).
+# The server handles one request at a time and closes each connection after
+# answering it.
+
+import json
+import socket
+import string
+import subprocess
+import url
+
+# ---- messages ----
+
+# What a server sent back; also what a server handler returns.
+struct Response:
+    status: int
+    reason: str
+    headers: list[(str, str)]
+    body: str
+    url: str                        # where it came from, after redirects
+
+    # The first header called name (in any case).
+    fn header(self, name: &str) -> Option[str]:
+        return _find_header(&self.headers, name)
+
+    # Whether the status is 2xx.
+    fn ok(self) -> bool:
+        return self.status >= 200 and self.status < 300
+
+    fn text(self) -> str:
+        return self.body.clone()
+
+    # The body parsed as JSON.
+    fn json(self) -> Result[json.Value, str]:
+        return json.parse(&self.body)
+
+    # A copy with one more header (for building server responses).
+    fn with_header(self, name: &str, value: &str) -> Response:
+        var hs = self.headers.clone()
+        hs.push((name.clone(), value.clone()))
+        return Response(self.status, self.reason.clone(), hs, self.body.clone(), self.url.clone())
+
+    fn str(self) -> str:
+        return "<Response " + str(self.status) + " " + self.reason + ">"
+
+# A request as a server handler sees it.
+struct Request:
+    method: str                     # "GET", "POST", ...
+    path: str                       # decoded, without the query
+    query: str                      # raw, without the "?"
+    headers: list[(str, str)]
+    body: str
+    client: str                     # the client's address
+
+    fn header(self, name: &str) -> Option[str]:
+        return _find_header(&self.headers, name)
+
+    # The query's (key, value) pairs, decoded.
+    fn params(self) -> list[(str, str)]:
+        return url.parse_qsl(&self.query)
+
+    # The first value of query parameter name.
+    fn param(self, name: &str) -> Option[str]:
+        for (k, v) in self.params():
+            if k == name:
+                return Some(v)
+        return None
+
+    # The body as form fields (application/x-www-form-urlencoded).
+    fn form(self) -> list[(str, str)]:
+        return url.parse_qsl(&self.body)
+
+    fn json(self) -> Result[json.Value, str]:
+        return json.parse(&self.body)
+
+    fn str(self) -> str:
+        return "<Request " + self.method + " " + self.path + ">"
+
+fn _find_header(headers: &list[(str, str)], name: &str) -> Option[str]:
+    let want = name.lower()
+    for (k, v) in headers:
+        if k.lower() == want:
+            return Some(v)
+    return None
+
+# The standard phrase for a status code ("Not Found" for 404).
+fn reason(status: int) -> str:
+    let codes = [100, 101, 200, 201, 202, 204, 206, 301, 302, 303, 304, 307, 308,
+                 400, 401, 403, 404, 405, 406, 408, 409, 410, 411, 413, 414, 415, 418,
+                 422, 429, 500, 501, 502, 503, 504, 505]
+    let names = ["Continue", "Switching Protocols", "OK", "Created", "Accepted", "No Content",
+                 "Partial Content", "Moved Permanently", "Found", "See Other", "Not Modified",
+                 "Temporary Redirect", "Permanent Redirect", "Bad Request", "Unauthorized",
+                 "Forbidden", "Not Found", "Method Not Allowed", "Not Acceptable",
+                 "Request Timeout", "Conflict", "Gone", "Length Required", "Content Too Large",
+                 "URI Too Long", "Unsupported Media Type", "I'm a teapot",
+                 "Unprocessable Content", "Too Many Requests", "Internal Server Error",
+                 "Not Implemented", "Bad Gateway", "Service Unavailable", "Gateway Timeout",
+                 "HTTP Version Not Supported"]
+    for i in 0..len(codes):
+        if codes[i] == status:
+            return names[i]
+    return ""
+
+# A plain-text response.
+fn response(status: int, body: &str) -> Response:
+    return Response(status, reason(status), [("Content-Type", "text/plain; charset=utf-8")], body.clone(), "")
+
+# A 200 response with an HTML body.
+fn html(body: &str) -> Response:
+    return Response(200, "OK", [("Content-Type", "text/html; charset=utf-8")], body.clone(), "")
+
+# A 200 response with a JSON body.
+fn json_response(v: &json.Value) -> Response:
+    return Response(200, "OK", [("Content-Type", "application/json")], json.dump(v) + "\n", "")
+
+# A redirect (302) to location.
+fn redirect(location: &str) -> Response:
+    return Response(302, "Found", [("Location", location.clone())], "", "")
+
+# ---- reading from a connection ----
+
+const _MAX_HEAD: int = 65536
+
+struct _Conn:
+    sock: socket.Socket
+    buf: str
+    eof: bool
+
+    # Reads more into buf; false once the other side has closed.
+    fn fill(mut self) -> Result[bool, str]:
+        if self.eof:
+            return Ok(false)
+        let s = self.sock.recv(65536)?
+        if s == "":
+            self.eof = true
+            return Ok(false)
+        self.buf += s
+        return Ok(true)
+
+    # Everything up to delim (which is consumed and not returned).
+    fn until(mut self, delim: &str, limit: int) -> Result[str, str]:
+        while true:
+            let at = self.buf.find(delim.clone())
+            if at.is_some():
+                let out = self.buf[0:at.unwrap()]
+                self.buf = self.buf[at.unwrap() + len(delim):]
+                return Ok(out)
+            if len(self.buf) > limit:
+                return Err("header too long")
+            if not self.fill()?:
+                return Err("connection closed early")
+        return Err("unreachable")
+
+    fn exactly(mut self, n: int) -> Result[str, str]:
+        while len(self.buf) < n:
+            if not self.fill()?:
+                return Err("connection closed early")
+        let out = self.buf[0:n]
+        self.buf = self.buf[n:]
+        return Ok(out)
+
+    fn rest(mut self) -> Result[str, str]:
+        while self.fill()?:
+            continue
+        let out = self.buf.clone()
+        self.buf = ""
+        return Ok(out)
+
+    # A body sent with Transfer-Encoding: chunked.
+    fn chunked(mut self) -> Result[str, str]:
+        var out = ""
+        while true:
+            var line = self.until(&"\r\n", _MAX_HEAD)?
+            let semi = line.find(";")
+            if semi.is_some():
+                line = line[0:semi.unwrap()]
+            let n = _parse_hex(&line.trim())
+            if n < 0:
+                return Err("bad chunk size: " + line)
+            if n == 0:
+                # Trailers, then a blank line.
+                while self.until(&"\r\n", _MAX_HEAD)? != "":
+                    continue
+                return Ok(out)
+            out += self.exactly(n)?
+            self.exactly(2)?
+        return Ok(out)
+
+    # The body that follows headers, by whichever framing they say.
+    fn body(mut self, headers: &list[(str, str)], to_eof: bool) -> Result[str, str]:
+        let te = _find_header(headers, &"transfer-encoding").unwrap_or("").lower()
+        if te.contains("chunked"):
+            return self.chunked()
+        let cl = _find_header(headers, &"content-length")
+        if cl.is_some():
+            let n = cl.unwrap().trim().parse_int()
+            if n.is_none() or n.unwrap() < 0:
+                return Err("bad Content-Length: " + cl.unwrap())
+            return self.exactly(n.unwrap())
+        if to_eof:
+            return self.rest()
+        return Ok("")
+
+fn _parse_hex(s: &str) -> int:
+    if s == "" or len(s) > 15:
+        return -1
+    var v = 0
+    for c in s.lower().chars():
+        let d = "0123456789abcdef".find(str(c))
+        if d.is_none():
+            return -1
+        v = v * 16 + d.unwrap()
+    return v
+
+# "Name: value" lines as pairs.
+fn _parse_headers(lines: &list[str]) -> Result[list[(str, str)], str]:
+    var out: list[(str, str)] = []
+    for line in lines:
+        if line == "":
+            continue
+        let c = line.find(":")
+        if c.is_none():
+            return Err("bad header line: " + line)
+        out.push((line[0:c.unwrap()].trim(), line[c.unwrap() + 1:].trim()))
+    return Ok(out)
+
+# "HTTP/1.1 404 Not Found" as (404, "Not Found").
+fn _parse_status(line: &str) -> Result[(int, str), str]:
+    let parts = string.splitn(line, &" ", 2)
+    if len(parts) < 2 or not parts[0].starts_with("HTTP/"):
+        return Err("bad status line: " + line)
+    let code = parts[1].parse_int()
+    if code.is_none():
+        return Err("bad status line: " + line)
+    let phrase = parts[2].trim() if len(parts) > 2 else reason(code.unwrap())
+    return Ok((code.unwrap(), phrase))
+
+# ---- the client ----
+
+fn _has_header(headers: &list[(str, str)], name: &str) -> bool:
+    return _find_header(headers, name).is_some()
+
+# One request over a plain socket, without following redirects.
+fn _send_plain(method: &str, u: &url.URL, headers: &list[(str, str)], body: &str, timeout: f64) -> Result[Response, str]:
+    let host = u.host()
+    if host == "":
+        return Err("no host in URL: " + u.str())
+    var port = u.port()
+    if port < 0:
+        port = 80
+    let sock = socket.connect_timeout(&host, port, timeout)?
+    if timeout > 0.0:
+        sock.set_timeout(timeout)?
+    var target = u.path if u.path != "" else "/"
+    if u.query != "":
+        target += "?" + u.query
+    var head = method + " " + target + " HTTP/1.1\r\n"
+    if not _has_header(headers, &"host"):
+        head += "Host: " + (host if port == 80 else host + ":" + str(port)) + "\r\n"
+    if not _has_header(headers, &"user-agent"):
+        head += "User-Agent: silly-http/1.0\r\n"
+    if not _has_header(headers, &"accept"):
+        head += "Accept: */*\r\n"
+    if body != "" or method == "POST" or method == "PUT" or method == "PATCH":
+        head += "Content-Length: " + str(len(body)) + "\r\n"
+    head += "Connection: close\r\n"
+    for (k, v) in headers:
+        head += k + ": " + v + "\r\n"
+    let sent = sock.send(&(head + "\r\n" + body))
+    if sent.is_err():
+        sock.close()
+        return Err(sent.unwrap_err())
+    var conn = _Conn(sock, "", false)
+    let r = _read_response(&mut conn, method)
+    sock.close()
+    return r
+
+fn _read_response(conn: &mut _Conn, method: &str) -> Result[Response, str]:
+    while true:
+        let head = conn.until(&"\r\n\r\n", _MAX_HEAD)?
+        let lines = head.split("\r\n")
+        let (status, phrase) = _parse_status(&lines[0])?
+        let headers = _parse_headers(&lines[1:])?
+        if status >= 100 and status < 200:
+            continue                # 100 Continue and friends come before the real answer
+        var body = ""
+        if method != "HEAD" and status != 204 and status != 304:
+            body = conn.body(&headers, true)?
+        return Ok(Response(status, phrase, headers, body, ""))
+    return Err("unreachable")
+
+# One request through curl (for https), without following redirects.
+fn _send_curl(method: &str, target: &str, headers: &list[(str, str)], body: &str, timeout: f64) -> Result[Response, str]:
+    var argv = ["curl", "-sS", "-i", "--http1.1", "-X", method.clone()]
+    if method == "HEAD":
+        argv = ["curl", "-sS", "-i", "--http1.1", "-I"]
+    if timeout > 0.0:
+        argv.push("--max-time")
+        argv.push(str(timeout))
+    if not _has_header(headers, &"user-agent"):
+        argv.push("-A")
+        argv.push("silly-http/1.0")
+    for (k, v) in headers:
+        argv.push("-H")
+        argv.push(k + ": " + v)
+    if body != "" or method == "POST" or method == "PUT" or method == "PATCH":
+        argv.push("--data-binary")
+        argv.push("@-")
+    argv.push("--")
+    argv.push(target.clone())
+    let r = subprocess.run_input(subprocess.join(&argv), body.clone())
+    if r.code == 127 or r.code == -1:
+        return Err("https needs the curl program, which wasn't found")
+    if r.code != 0:
+        return Err(r.stderr.trim().replace("curl: ", ""))
+    # curl prints the headers it got (several blocks if there was a 100 Continue),
+    # then the body with any chunking already undone.
+    var out = r.stdout.clone()
+    while true:
+        let end = out.find("\r\n\r\n")
+        if end.is_none():
+            return Err("bad response from curl")
+        let lines = out[0:end.unwrap()].split("\r\n")
+        out = out[end.unwrap() + 4:]
+        let (status, phrase) = _parse_status(&lines[0])?
+        if status >= 100 and status < 200:
+            continue
+        let headers = _parse_headers(&lines[1:])?
+        return Ok(Response(status, phrase, headers, out, ""))
+    return Err("unreachable")
+
+# Sends a request and returns the response, following redirects. headers are
+# extra request headers; timeout is in seconds (0.0 for none).
+fn request_timeout(method: &str, target: &str, headers: &list[(str, str)], body: &str, timeout: f64) -> Result[Response, str]:
+    var m = method.upper()
+    var b = body.clone()
+    var at = target.clone()
+    for _ in 0..6:
+        let u = url.parse(&at)
+        var r = Response(0, "", [], "", "")
+        if u.scheme == "http":
+            r = _send_plain(&m, &u, headers, &b, timeout)?
+        elif u.scheme == "https":
+            r = _send_curl(&m, &at, headers, &b, timeout)?
+        else:
+            return Err("unsupported URL: " + at)
+        let loc = r.header(&"location")
+        let redirect = r.status == 301 or r.status == 302 or r.status == 303 or r.status == 307 or r.status == 308
+        if not redirect or loc.is_none():
+            return Ok(Response(r.status, r.reason.clone(), r.headers.clone(), r.body.clone(), at))
+        at = url.urljoin(&at, &loc.unwrap())
+        # 303 (and, as browsers do, 301/302 after a POST) turn into a GET.
+        if r.status == 303 or ((r.status == 301 or r.status == 302) and m == "POST"):
+            m = "GET"
+            b = ""
+    return Err("too many redirects")
+
+# Sends method to target (http:// or https://), following redirects.
+fn request(method: &str, target: &str, headers: &list[(str, str)], body: &str) -> Result[Response, str]:
+    return request_timeout(method, target, headers, body, 0.0)
+
+# A GET of target.
+fn get(target: &str) -> Result[Response, str]:
+    return request(&"GET", target, &[], &"")
+
+# The body of a GET, or an error if the status isn't 2xx.
+fn fetch(target: &str) -> Result[str, str]:
+    let r = get(target)?
+    if not r.ok():
+        return Err(str(r.status) + " " + r.reason)
+    return Ok(r.body)
+
+# A POST of body to target with the given Content-Type.
+fn post(target: &str, body: &str, content_type: &str) -> Result[Response, str]:
+    return request(&"POST", target, &[("Content-Type", content_type.clone())], body)
+
+# Posts form fields, url-encoded.
+fn post_form(target: &str, fields: &list[(str, str)]) -> Result[Response, str]:
+    return post(target, &url.urlencode(fields), &"application/x-www-form-urlencoded")
+
+# Posts a JSON value.
+fn post_json(target: &str, v: &json.Value) -> Result[Response, str]:
+    return post(target, &json.dump(v), &"application/json")
+
+# ---- the server ----
+
+# A listening HTTP server (see server(), quiet_server() and serve()).
+struct Server:
+    sock: socket.Socket
+    quiet: bool                     # don't log each request to stderr
+
+    # The port it listens on (the one picked, if it was started on port 0).
+    fn port(self) -> int:
+        return self.sock.local_port()
+
+    # Waits for one connection, answers its request with handler, and closes it.
+    # A broken request gets a 400 and is otherwise ignored.
+    fn handle_one(self, handler: fn(Request) -> Response) -> Result[bool, str]:
+        let c = self.sock.accept()?
+        c.set_timeout(30.0)?
+        let (client, _) = c.peer()
+        var conn = _Conn(c, "", false)
+        let req = _read_request(&mut conn, &client)
+        var resp = Response(0, "", [], "", "")
+        var method = ""
+        if req.is_err():
+            resp = response(400, &(req.unwrap_err() + "\n"))
+        else:
+            let rq = req.unwrap()
+            method = rq.method.clone()
+            resp = handler(rq.clone())
+            if not self.quiet:
+                eprint(client + " \"" + rq.method + " " + rq.path + "\" " + str(resp.status))
+        let sent = c.send(&_format_response(&resp, method == "HEAD"))
+        c.close()
+        if sent.is_err():
+            return Err(sent.unwrap_err())
+        return Ok(true)
+
+    # Answers requests until the program is stopped.
+    fn serve_forever(self, handler: fn(Request) -> Response):
+        while true:
+            let r = self.handle_one(handler)
+            if r.is_err() and not self.quiet:
+                eprint("http: " + r.unwrap_err())
+
+    fn close(self):
+        self.sock.close()
+
+# A server listening on host:port (port 0 picks a free one; see port()).
+fn server(host: &str, port: int) -> Result[Server, str]:
+    let s = socket.listen(host, port, 64)?
+    return Ok(Server(s, false))
+
+# Like server, without the request log.
+fn quiet_server(host: &str, port: int) -> Result[Server, str]:
+    let s = socket.listen(host, port, 64)?
+    return Ok(Server(s, true))
+
+# Serves handler on host:port until the program is stopped.
+fn serve(host: &str, port: int, handler: fn(Request) -> Response) -> Result[bool, str]:
+    let s = server(host, port)?
+    eprint("Serving HTTP on http://" + (host if host != "" else "0.0.0.0") + ":" + str(s.port()) + "/")
+    s.serve_forever(handler)
+    return Ok(true)
+
+fn _read_request(conn: &mut _Conn, client: &str) -> Result[Request, str]:
+    let head = conn.until(&"\r\n\r\n", _MAX_HEAD)?
+    let lines = head.split("\r\n")
+    let parts = lines[0].split(" ")
+    if len(parts) != 3 or not parts[2].starts_with("HTTP/"):
+        return Err("bad request line: " + lines[0])
+    let headers = _parse_headers(&lines[1:])?
+    var target = parts[1].clone()
+    var query = ""
+    let q = target.find("?")
+    if q.is_some():
+        query = target[q.unwrap() + 1:]
+        target = target[0:q.unwrap()]
+    let body = conn.body(&headers, false)?
+    return Ok(Request(parts[0].upper(), url.unquote(&target), query, headers, body, client.clone()))
+
+fn _format_response(r: &Response, head_only: bool) -> str:
+    let phrase = r.reason if r.reason != "" else reason(r.status)
+    var out = "HTTP/1.1 " + str(r.status) + " " + phrase + "\r\n"
+    for (k, v) in r.headers:
+        let lk = k.lower()
+        if lk != "content-length" and lk != "connection" and lk != "transfer-encoding":
+            out += k + ": " + v + "\r\n"
+    if not _has_header(&r.headers, &"server"):
+        out += "Server: silly-http/1.0\r\n"
+    out += "Content-Length: " + str(len(r.body)) + "\r\nConnection: close\r\n\r\n"
+    if not head_only:
+        out += r.body
+    return out

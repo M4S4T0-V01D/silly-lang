@@ -1,0 +1,346 @@
+# re: 70 patterns checked against Python's re
+
+import re
+
+fn show(m: &re.Match) -> str:
+    var s = str(m.start(0)) + "-" + str(m.end(0))
+    for i in 1..m.len():
+        match m.get(i):
+            case Some(t): s += "|" + t
+            case None: s += "|~"
+    return s
+
+fn main():
+    var r = re.compile("a+").unwrap()
+    var o = ""
+    for m in r.find_iter("caaab aa"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("a*").unwrap()
+    var o = ""
+    for m in r.find_iter("baac"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("a*?b").unwrap()
+    var o = ""
+    for m in r.find_iter("aaab"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(a|ab)(c|bcd)(d*)").unwrap()
+    var o = ""
+    for m in r.find_iter("abcd"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\bfoo\\b").unwrap()
+    var o = ""
+    for m in r.find_iter("foo foobar barfoo foo."):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\Bo\\B").unwrap()
+    var o = ""
+    for m in r.find_iter("foo boo"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("^\\w+").unwrap()
+    var o = ""
+    for m in r.find_iter("hello world"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?m)^\\w+$").unwrap()
+    var o = ""
+    for m in r.find_iter("ab\ncd\nef"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("x$").unwrap()
+    var o = ""
+    for m in r.find_iter("x\n"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("x\\Z").unwrap()
+    var o = ""
+    for m in r.find_iter("x\n"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?s)a.b").unwrap()
+    var o = ""
+    for m in r.find_iter("a\nb"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("a.b").unwrap()
+    var o = ""
+    for m in r.find_iter("a\nb axb"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[^a-c]+").unwrap()
+    var o = ""
+    for m in r.find_iter("abcdefabc"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[\\d.]+").unwrap()
+    var o = ""
+    for m in r.find_iter("v1.2.3 and 4"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[]a]+").unwrap()
+    var o = ""
+    for m in r.find_iter("a]]b"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[a-]+").unwrap()
+    var o = ""
+    for m in r.find_iter("-a-b"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?i)HeLLo").unwrap()
+    var o = ""
+    for m in r.find_iter("say hello HELLO"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?i)[a-c]+").unwrap()
+    var o = ""
+    for m in r.find_iter("xABCabcx"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(\\w)\\1").unwrap()
+    var o = ""
+    for m in r.find_iter("aabbcd"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?P<q>['\\\"]).*?(?P=q)").unwrap()
+    var o = ""
+    for m in r.find_iter("say 'hi' and \"yo\""):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\d{2,3}").unwrap()
+    var o = ""
+    for m in r.find_iter("1 12 123 1234 12345"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\d{2,}").unwrap()
+    var o = ""
+    for m in r.find_iter("1 12 123456"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\d{,2}").unwrap()
+    var o = ""
+    for m in r.find_iter("123"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("x{2}").unwrap()
+    var o = ""
+    for m in r.find_iter("xxxxx"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("a{,}").unwrap()
+    var o = ""
+    for m in r.find_iter("aa"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\d{2,3}?").unwrap()
+    var o = ""
+    for m in r.find_iter("12345"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("foo(?=bar)").unwrap()
+    var o = ""
+    for m in r.find_iter("foobar foobaz"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("foo(?!bar)").unwrap()
+    var o = ""
+    for m in r.find_iter("foobar foobaz"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?<=\\$)\\d+").unwrap()
+    var o = ""
+    for m in r.find_iter("cost $42 or 7"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?<!\\$)\\b\\d+").unwrap()
+    var o = ""
+    for m in r.find_iter("cost $42 or 7"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(a)|(b)").unwrap()
+    var o = ""
+    for m in r.find_iter("ab"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(a*)*b").unwrap()
+    var o = ""
+    for m in r.find_iter("aaab"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(a*)+").unwrap()
+    var o = ""
+    for m in r.find_iter("aa"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?:ab)+").unwrap()
+    var o = ""
+    for m in r.find_iter("ababab abx"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("").unwrap()
+    var o = ""
+    for m in r.find_iter("abc"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\s*").unwrap()
+    var o = ""
+    for m in r.find_iter("a b"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("é+").unwrap()
+    var o = ""
+    for m in r.find_iter("caféé ée"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile(".").unwrap()
+    var o = ""
+    for m in r.find_iter("aé😀"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[é😀]").unwrap()
+    var o = ""
+    for m in r.find_iter("xé😀"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(\\d+)-(\\d+)?").unwrap()
+    var o = ""
+    for m in r.find_iter("1- 2-3"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\x41é").unwrap()
+    var o = ""
+    for m in r.find_iter("Aé"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("a|b|c|").unwrap()
+    var o = ""
+    for m in r.find_iter("xb"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?i:a)b").unwrap()
+    var o = ""
+    for m in r.find_iter("Ab AB"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("[\\w-]+@[\\w.]+").unwrap()
+    var o = ""
+    for m in r.find_iter("mail bob-x@ex.com now"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("(?<=ab|cd)x").unwrap()
+    var o = ""
+    for m in r.find_iter("abx cdx efx"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\W+").unwrap()
+    var o = ""
+    for m in r.find_iter("a, b!c"):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\S+").unwrap()
+    var o = ""
+    for m in r.find_iter(" ab  cd "):
+        o += show(&m) + " "
+    print(o)
+    var r = re.compile("\\D+").unwrap()
+    var o = ""
+    for m in r.find_iter("a1bb22c"):
+        o += show(&m) + " "
+    print(o)
+    print(re.sub("(\\w+)@(\\w+)", "\\2 at \\1", "bob@ex amy@co"))
+    print(re.sub("a*", "-", "baac"))
+    print(re.sub("(?P<w>\\w+)", "[\\g<w>]", "hi yo"))
+    print(re.sub("\\s+", " ", "a   b \t c"))
+    print(re.sub("x*", "-", "abc"))
+    print(re.sub("(\\d)", "\\g<1>0", "a1b2"))
+    print("/".join(re.split(",\\s*", "a, b,c")))
+    print("/".join(re.split("(,)", "a,b,c")))
+    print("/".join(re.split("x*", "axbc")))
+    print("/".join(re.split("\\d", "a1b2c")))
+    print("/".join(re.split("(a)|(b)", "1a2b3")))
+    print(re.compile("(abc").is_err())
+    print(re.compile("abc)").is_err())
+    print(re.compile("*a").is_err())
+    print(re.compile("a**").is_err())
+    print(re.compile("[abc").is_err())
+    print(re.compile("\\q").is_err())
+    print(re.compile("(?<=a+)b").is_err())
+    print(re.compile("(?P<1>x)").is_err())
+    print(re.compile("\\2(a)").is_err())
+    print(re.compile("a{3,2}").is_err())
+    print(re.escape("a.b*c"), re.is_match("^\\d+$", "123"), re.fullmatch("a|ab", "ab").is_some(), re.match_start("b", "ab").is_none())
+
+#> 1-4 6-8 
+#> 0-0 1-3 3-3 4-4 
+#> 0-4 
+#> 0-4|a|bcd| 
+#> 0-3 18-21 
+#> 1-2 5-6 
+#> 0-5 
+#> 0-2 3-5 6-8 
+#> 0-1 
+#>
+#> 0-3 
+#> 4-7 
+#> 3-6 
+#> 1-6 11-12 
+#> 0-3 
+#> 0-3 
+#> 4-9 10-15 
+#> 1-7 
+#> 0-2|a 2-4|b 
+#> 4-8|' 13-17|" 
+#> 2-4 5-8 9-12 14-17 17-19 
+#> 2-4 5-11 
+#> 0-2 2-3 3-3 
+#> 0-2 2-4 
+#> 0-2 2-2 
+#> 0-2 2-4 
+#> 0-3 
+#> 7-10 
+#> 6-8 
+#> 12-13 
+#> 0-1|a|~ 1-2|~|b 
+#> 0-4| 
+#> 0-2| 2-2| 
+#> 0-6 7-9 
+#> 0-0 1-1 2-2 3-3 
+#> 0-0 1-2 2-2 3-3 
+#> 3-7 8-10 
+#> 0-1 1-3 3-7 
+#> 1-3 3-7 
+#> 0-2|1|~ 3-6|2|3 
+#> 0-3 
+#> 0-0 1-2 2-2 
+#> 0-2 
+#> 5-17 
+#> 2-3 6-7 
+#> 1-3 4-5 
+#> 1-3 5-7 
+#> 0-1 2-4 6-7 
+#> ex at bob co at amy
+#> -b--c-
+#> [hi] [yo]
+#> a b c
+#> -a-b-c-
+#> a10b20
+#> a/b/c
+#> a/,/b/,/c
+#> /a//b/c/
+#> a/b/c
+#> 1/a//2//b/3
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> true
+#> a\.b\*c true true true

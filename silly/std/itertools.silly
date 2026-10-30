@@ -1,0 +1,238 @@
+# Combining and slicing lists, like Python's itertools. Every function returns a
+# new list rather than a lazy iterator.
+#
+#     import itertools as it
+#     fn main():
+#         print(it.combinations(&[1, 2, 3], 2))     # [[1, 2], [1, 3], [2, 3]]
+#         print(it.product(&[[0, 1], [5, 6]]))      # [[0, 5], [0, 6], [1, 5], [1, 6]]
+#         print(it.accumulate(&[1, 2, 3, 4], fn(a, b) => a * b))   # [1, 2, 6, 24]
+#         print(it.pairwise(&["a", "b", "c"]))      # [("a", "b"), ("b", "c")]
+
+# The lists one after another.
+fn chain[T](lists: &list[list[T]]) -> list[T]:
+    var out: list[T] = []
+    for l in lists:
+        for x in l:
+            out.push(x.clone())
+    return out
+
+# x, n times.
+fn repeat[T](x: &T, n: int) -> list[T]:
+    var out: list[T] = []
+    for _ in 0..n:
+        out.push(x.clone())
+    return out
+
+# The list repeated n times over.
+fn cycle[T](xs: &list[T], n: int) -> list[T]:
+    var out: list[T] = []
+    for _ in 0..n:
+        for x in xs:
+            out.push(x.clone())
+    return out
+
+# Items from start up to stop (exclusive), every step-th. Out-of-range bounds are clipped.
+fn islice[T](xs: &list[T], start: int, stop: int, step: int) -> list[T]:
+    if step <= 0:
+        panic("itertools.islice: step must be positive")
+    var out: list[T] = []
+    var i = max(start, 0)
+    let end = min(stop, len(xs))
+    while i < end:
+        out.push(xs[i].clone())
+        i += step
+    return out
+
+# Running totals of f: [x0, f(x0, x1), f(f(x0, x1), x2), ...].
+fn accumulate[T](xs: &list[T], f: fn(T, T) -> T) -> list[T]:
+    var out: list[T] = []
+    for x in xs:
+        if len(out) == 0:
+            out.push(x.clone())
+        else:
+            out.push(f(out[len(out) - 1].clone(), x.clone()))
+    return out
+
+# Running sums.
+fn sums(xs: &list[int]) -> list[int]:
+    return accumulate(xs, fn(a, b) => a + b)
+
+# The items while pred holds, stopping at the first that fails.
+fn take_while[T](xs: &list[T], pred: fn(T) -> bool) -> list[T]:
+    var out: list[T] = []
+    for x in xs:
+        if not pred(x.clone()):
+            break
+        out.push(x.clone())
+    return out
+
+# Everything from the first item where pred fails.
+fn drop_while[T](xs: &list[T], pred: fn(T) -> bool) -> list[T]:
+    var out: list[T] = []
+    var dropping = true
+    for x in xs:
+        if dropping and pred(x.clone()):
+            continue
+        dropping = false
+        out.push(x.clone())
+    return out
+
+# The items whose matching selector is true.
+fn compress[T](xs: &list[T], selectors: &list[bool]) -> list[T]:
+    var out: list[T] = []
+    for i in 0..min(len(xs), len(selectors)):
+        if selectors[i]:
+            out.push(xs[i].clone())
+    return out
+
+# The items where pred is false (the opposite of filter).
+fn filter_false[T](xs: &list[T], pred: fn(T) -> bool) -> list[T]:
+    var out: list[T] = []
+    for x in xs:
+        if not pred(x.clone()):
+            out.push(x.clone())
+    return out
+
+# Each item with the next one.
+fn pairwise[T](xs: &list[T]) -> list[(T, T)]:
+    var out: list[(T, T)] = []
+    for i in 1..len(xs):
+        out.push((xs[i - 1].clone(), xs[i].clone()))
+    return out
+
+# Every run of n consecutive items (sliding window).
+fn windows[T](xs: &list[T], n: int) -> list[list[T]]:
+    var out: list[list[T]] = []
+    if n <= 0:
+        return out
+    var i = 0
+    while i + n <= len(xs):
+        out.push(xs[i:i + n])
+        i += 1
+    return out
+
+# Items in lists of n; the last may be shorter.
+fn batched[T](xs: &list[T], n: int) -> list[list[T]]:
+    if n <= 0:
+        panic("itertools.batched: n must be at least one")
+    var out: list[list[T]] = []
+    var i = 0
+    while i < len(xs):
+        out.push(xs[i:min(i + n, len(xs))])
+        i += n
+    return out
+
+# Pairs of items at the same index, padding the shorter list with fill.
+fn zip_longest[A, B](xs: &list[A], ys: &list[B], fill_a: &A, fill_b: &B) -> list[(A, B)]:
+    var out: list[(A, B)] = []
+    for i in 0..max(len(xs), len(ys)):
+        let a = xs[i].clone() if i < len(xs) else fill_a.clone()
+        let b = ys[i].clone() if i < len(ys) else fill_b.clone()
+        out.push((a, b))
+    return out
+
+# The items with duplicates removed, keeping the first of each.
+fn unique[T: Eq](xs: &list[T]) -> list[T]:
+    var out: list[T] = []
+    for x in xs:
+        if not out.contains(x.clone()):
+            out.push(x.clone())
+    return out
+
+# ---- combinatorics ----
+
+# The cartesian product: one item from each list, the last list varying fastest.
+fn product[T](lists: &list[list[T]]) -> list[list[T]]:
+    var out: list[list[T]] = [[]]
+    for l in lists:
+        var next: list[list[T]] = []
+        for prefix in out:
+            for x in l:
+                var p = prefix.clone()
+                p.push(x.clone())
+                next.push(p)
+        out = next
+    return out
+
+# The product of xs with itself, n times over.
+fn product_n[T](xs: &list[T], n: int) -> list[list[T]]:
+    var lists: list[list[T]] = []
+    for _ in 0..n:
+        lists.push(xs.clone())
+    return product(&lists)
+
+# Pick k items by index list, the common step of the generators below.
+fn _pick[T](xs: &list[T], idx: &list[int]) -> list[T]:
+    var out: list[T] = []
+    for i in idx:
+        out.push(xs[i].clone())
+    return out
+
+# Every ordering of k items, in lexicographic order of position.
+fn permutations[T](xs: &list[T], k: int) -> list[list[T]]:
+    var out: list[list[T]] = []
+    let n = len(xs)
+    if k < 0 or k > n:
+        return out
+    var idx: list[int] = []
+    var used: list[bool] = []
+    for _ in 0..n:
+        used.push(false)
+    _perm(xs, k, &mut idx, &mut used, &mut out)
+    return out
+
+fn _perm[T](xs: &list[T], k: int, idx: &mut list[int], used: &mut list[bool], out: &mut list[list[T]]):
+    if len(idx) == k:
+        out.push(_pick(xs, idx))
+        return
+    for i in 0..len(xs):
+        if not used[i]:
+            used[i] = true
+            idx.push(i)
+            _perm(xs, k, &mut idx, &mut used, &mut out)
+            idx.pop()
+            used[i] = false
+
+# Every ordering of all the items.
+fn permutations_all[T](xs: &list[T]) -> list[list[T]]:
+    return permutations(xs, len(xs))
+
+# Every choice of k items, keeping their order.
+fn combinations[T](xs: &list[T], k: int) -> list[list[T]]:
+    return _comb(xs, k, false)
+
+# Every choice of k items where an item may be chosen more than once.
+fn combinations_with_replacement[T](xs: &list[T], k: int) -> list[list[T]]:
+    return _comb(xs, k, true)
+
+fn _comb[T](xs: &list[T], k: int, again: bool) -> list[list[T]]:
+    var out: list[list[T]] = []
+    let n = len(xs)
+    if k < 0 or (k > n and not again) or (n == 0 and k > 0):
+        return out
+    var idx: list[int] = []
+    for i in 0..k:
+        idx.push(0 if again else i)
+    loop:
+        out.push(_pick(xs, &idx))
+        # Find the rightmost index that can still move up.
+        var i = k - 1
+        while i >= 0:
+            let top = n - 1 if again else n - k + i
+            if idx[i] < top:
+                break
+            i -= 1
+        if i < 0:
+            break
+        idx[i] += 1
+        for j in i + 1..k:
+            idx[j] = idx[i] if again else idx[j - 1] + 1
+    return out
+
+# Every subset, from the empty one up, smaller ones first.
+fn powerset[T](xs: &list[T]) -> list[list[T]]:
+    var out: list[list[T]] = []
+    for k in 0..len(xs) + 1:
+        for c in combinations(xs, k):
+            out.push(c.clone())
+    return out

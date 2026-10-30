@@ -1,0 +1,99 @@
+# The ui module driven by simulated input on a headless window.
+
+import gfx
+import ui
+
+fn click(app: &mut ui.App, x: int, y: int):
+    app.simulate(gfx.Event.MouseMove(x, y))
+    app.simulate(gfx.Event.MouseDown(x, y, gfx.MOUSE_LEFT, 1))
+    app.simulate(gfx.Event.MouseUp(x, y, gfx.MOUSE_LEFT))
+
+fn key(app: &mut ui.App, k: int, mods: int):
+    app.simulate(gfx.Event.KeyDown(k, mods, false))
+
+fn main():
+    var app = ui.app("test", 400, 300)
+    app.set_frame_limit(0)
+    var n = 0
+    var pressed = 0
+    var on = false
+    var name = ""
+    var vol = 0.0
+    var sel = 0
+    let items = ["one", "two", "three", "four"]
+    var rb = ui.Rect(0, 0, 0, 0)
+    var rc = ui.Rect(0, 0, 0, 0)
+    var re = ui.Rect(0, 0, 0, 0)
+    var rs = ui.Rect(0, 0, 0, 0)
+    var rk = ui.Rect(0, 0, 0, 0)
+    while app.frame():
+        if app.button("Press"):
+            pressed += 1
+        rb = app.last_rect()
+        app.checkbox("On", &mut on)
+        rc = app.last_rect()
+        app.entry("Name", &mut name)
+        re = app.last_rect()
+        let entered = app.entered()
+        app.slider("Vol", &mut vol, 0.0, 10.0)
+        rs = app.last_rect()
+        app.combobox("Pick", &items, &mut sel)
+        rk = app.last_rect()
+        if n == 0:
+            click(&mut app, rb.x + 5, rb.y + 5)
+        elif n == 1:
+            print("pressed", pressed)
+            click(&mut app, rc.x + 5, rc.y + 5)
+        elif n == 2:
+            print("on", on)
+            click(&mut app, re.x + 5, re.y + 5)
+            app.simulate(gfx.Event.Text("héllo"))
+            key(&mut app, gfx.KEY_BACKSPACE, 0)
+            app.simulate(gfx.Event.Text("o!"))
+        elif n == 3:
+            print("name", name)
+            key(&mut app, gfx.KEY_LEFT, 0)
+            key(&mut app, gfx.KEY_LEFT, gfx.MOD_SHIFT)
+            key(&mut app, gfx.KEY_LEFT, gfx.MOD_SHIFT)
+            app.simulate(gfx.Event.Text("L"))
+            key(&mut app, gfx.KEY_RETURN, 0)
+        elif n == 4:
+            print("name", name, "entered", entered)
+            key(&mut app, ord('a') as int, gfx.MOD_CTRL)
+            app.simulate(gfx.Event.Text("hi"))
+        elif n == 5:
+            print("name", name, "entered", entered)
+            click(&mut app, rs.x + rs.w / 2, rs.y + 10)
+        elif n == 6:
+            print("vol", vol)
+            key(&mut app, gfx.KEY_RIGHT, 0)
+        elif n == 7:
+            print("vol", vol)
+            click(&mut app, rk.x + 5, rk.y + 5)
+        elif n == 8:
+            # the list opens below the box: 4px gap, 4px inset, 26px rows
+            click(&mut app, rk.x + 20, rk.y + rk.h + 8 + 2 * 26 + 13)
+        elif n == 10:
+            # the popup is drawn last, so its pick lands one frame later
+            print("sel", sel, items[sel])
+            key(&mut app, gfx.KEY_TAB, gfx.MOD_SHIFT)
+            key(&mut app, gfx.KEY_TAB, gfx.MOD_SHIFT)
+            key(&mut app, gfx.KEY_TAB, gfx.MOD_SHIFT)
+        elif n == 11:
+            key(&mut app, gfx.KEY_SPACE, 0)
+        elif n == 12:
+            print("pressed", pressed, "on", on)
+            app.close()
+        n += 1
+    print("frames", n)
+
+#> pressed 1
+#> on true
+#> name héllo!
+#> name hélL! entered true
+#> name hi entered false
+#> vol 5.0
+#> vol 5.5
+#> sel 2 three
+#> pressed 1 on false
+#> frames 13

@@ -1,0 +1,53 @@
+# Binary search in sorted lists, like Python's bisect.
+#
+#     import bisect
+#     fn main():
+#         var xs = [1, 3, 3, 7]
+#         print(bisect.left(&xs, &3), bisect.right(&xs, &3))   # 1 3
+#         bisect.insort(&mut xs, 5)                          # [1, 3, 3, 5, 7]
+#         print(bisect.index(&xs, &7))                       # Some(4)
+
+# The first position where x could be inserted keeping the list sorted (before equal items).
+fn left[T: Ord](xs: &list[T], x: &T) -> int:
+    var lo = 0
+    var hi = len(xs)
+    while lo < hi:
+        let mid = (lo + hi) / 2
+        if xs[mid] < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+# The last such position (after equal items).
+fn right[T: Ord](xs: &list[T], x: &T) -> int:
+    var lo = 0
+    var hi = len(xs)
+    while lo < hi:
+        let mid = (lo + hi) / 2
+        if x < xs[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+# Inserts x after any equal items.
+fn insort[T: Ord](xs: &mut list[T], x: T):
+    let at = right(xs, &x)
+    xs.insert(at, x)
+
+# Inserts x into the sorted xs before any equal items.
+fn insort_left[T: Ord](xs: &mut list[T], x: T):
+    let at = left(xs, &x)
+    xs.insert(at, x)
+
+# The position of the first item equal to x.
+fn index[T: Ord](xs: &list[T], x: &T) -> Option[int]:
+    let i = left(xs, x)
+    if i < len(xs) and xs[i] == x:
+        return Some(i)
+    return None
+
+# How many items equal x.
+fn count[T: Ord](xs: &list[T], x: &T) -> int:
+    return right(xs, x) - left(xs, x)

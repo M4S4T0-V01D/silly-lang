@@ -1,0 +1,54 @@
+# Scope-based reclamation: these loops would exhaust the data stack if
+# iterations or discarded temporaries were not reclaimed.
+
+fn make(n: int) -> list[int]:
+    var out: list[int] = []
+    for i in 0..n:
+        out.push(i)
+    return out
+
+@compact
+fn squares(n: int) -> list[int]:
+    var scratch: list[str] = []
+    var out: list[int] = []
+    for i in 0..n:
+        scratch.push(str(i))
+        out.push(i * i)
+    return out
+
+fn label(i: int) -> str:
+    return f"item-{i}"
+
+fn main():
+    var total = 0
+    for round in 0..20000:
+        let xs = make(1000)
+        total += xs[999]
+    print(total)
+    var longest = 0
+    for i in 0..200000:
+        let s = label(i) + "!"
+        if len(s) > longest:
+            longest = len(s)
+    print(longest)
+    var keep: list[list[int]] = []
+    for i in 0..1000:
+        keep.push(squares(50))
+    print(len(keep), keep[999][49])
+    var s = ""
+    for i in 0..1000:
+        s = s + "x"
+    print(len(s))
+    var words: list[str] = []
+    for i in 0..5:
+        words.push(label(i))
+    print(words)
+    for i in 0..100000:
+        make(100)
+    print("done")
+#> 19980000
+#> 12
+#> 1000 2401
+#> 1000
+#> ["item-0", "item-1", "item-2", "item-3", "item-4"]
+#> done

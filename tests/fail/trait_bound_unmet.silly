@@ -1,0 +1,9 @@
+# error: P does not implement Show
+trait Show:
+    fn show(self) -> str
+struct P:
+    x: int
+fn f[T: Show](x: T) -> str:
+    return x.show()
+fn main():
+    print(f(P(1)))

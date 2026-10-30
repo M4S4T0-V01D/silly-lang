@@ -1,0 +1,5 @@
+# error: was moved at line
+fn main():
+    let a = [1, 2]
+    let b = a
+    print(a, b)

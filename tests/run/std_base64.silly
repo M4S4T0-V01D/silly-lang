@@ -1,0 +1,56 @@
+# base64, base32 and hex encode/decode
+
+import base64
+
+fn show(r: Result[str, str]):
+    match r:
+        case Ok(s): print("ok", s)
+        case Err(e): print("err", e)
+
+fn main():
+    for s in ["", "f", "fo", "foo", "foob", "fooba", "foobar"]:
+        print(base64.encode(&s), base64.b32_encode(&s), base64.hex_encode(&s))
+        show(base64.decode(&base64.encode(&s)))
+        show(base64.b32_decode(&base64.b32_encode(&s)))
+    print(base64.urlsafe_encode("\u{fb}\u{ff}"), base64.encode("\u{fb}\u{ff}"), base64.urlsafe_encode_nopad("\u{fb}\u{ff}"))
+    show(base64.urlsafe_decode("w7vDvw=="))
+    show(base64.decode("aGVs\nbG8="))
+    show(base64.decode("aGVsbG8"))
+    show(base64.decode("aGVsbG8=x"))
+    show(base64.decode("aGV*"))
+    show(base64.decode("a"))
+    show(base64.hex_decode("68656c6C6f"))
+    show(base64.hex_decode("6"))
+    show(base64.hex_decode("6g"))
+
+#>   
+#> ok 
+#> ok 
+#> Zg== MY====== 66
+#> ok f
+#> ok f
+#> Zm8= MZXQ==== 666f
+#> ok fo
+#> ok fo
+#> Zm9v MZXW6=== 666f6f
+#> ok foo
+#> ok foo
+#> Zm9vYg== MZXW6YQ= 666f6f62
+#> ok foob
+#> ok foob
+#> Zm9vYmE= MZXW6YTB 666f6f6261
+#> ok fooba
+#> ok fooba
+#> Zm9vYmFy MZXW6YTBOI====== 666f6f626172
+#> ok foobar
+#> ok foobar
+#> w7vDvw== w7vDvw== w7vDvw
+#> ok ûÿ
+#> ok hello
+#> ok hello
+#> err base64: data after padding
+#> err base64: invalid character '*'
+#> err base64: truncated input
+#> ok hello
+#> err hex: odd number of digits
+#> err hex: invalid digit at 1

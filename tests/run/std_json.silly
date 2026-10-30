@@ -1,0 +1,49 @@
+# The json module: parsing, building, writing and error positions.
+# Also covers recursive enums (Value holds list[Value] and map[str, Value]).
+
+import json
+fn main():
+    let src = "{\"name\": \"silly\", \"tags\": [1, 2.5, true, null, -0.5e2], \"esc\": \"a\\\"b\\\\c\\n\\u00e9\\ud83d\\ude00\", \"big\": 123456789012345678901, \"o\": {}}"
+    let v = json.parse(src).unwrap()
+    print(json.dump(&v))
+    print(v.get("name").unwrap().as_str(), v.find("tags.1").unwrap().as_float(), v.find("tags.4"), v.find("x.y"))
+    print(v.get("esc").unwrap().as_str().unwrap(), v.len(), v.keys(), v.get("big").unwrap().type_name())
+    var o = json.object()
+    o.set("ok", json.Value.Bool(true))
+    o.set("list", json.array_of_ints(&[1, 2, 3]))
+    var a = json.array()
+    a.push(json.string("tab\there"))
+    a.push(json.object())
+    o.set("nested", a)
+    print(json.pretty(&o, 2))
+    print(json.parse(&json.dump(&o)).unwrap() == o, json.quote("\u{1}x"))
+    for bad in ["", "[1,]", "{\"a\" 1}", "\"abc", "01", "[1]\n  x", "tru", "\"\\ud800\"", "1.", "{1:2}"]:
+        print(json.parse(&bad).unwrap_err())
+
+#> {"name":"silly","tags":[1,2.5,true,null,-50.0],"esc":"a\"b\\c\né😀","big":1.2345678901234568e+20,"o":{}}
+#> Some("silly") Some(2.5) Some(Float(-50.0)) None
+#> a"b\c
+#> é😀 5 ["name", "tags", "esc", "big", "o"] float
+#> {
+#>   "ok": true,
+#>   "list": [
+#>     1,
+#>     2,
+#>     3
+#>   ],
+#>   "nested": [
+#>     "tab\there",
+#>     {}
+#>   ]
+#> }
+#> true "\u0001x"
+#> json: unexpected end of input at line 1 column 1
+#> json: unexpected character at line 1 column 4
+#> json: expected ':' at line 1 column 6
+#> json: unterminated string at line 1 column 5
+#> json: extra text after the value at line 1 column 2
+#> json: extra text after the value at line 2 column 3
+#> json: unexpected character at line 1 column 1
+#> json: unpaired surrogate at line 1 column 8
+#> json: expected a digit at line 1 column 3
+#> json: expected a string key at line 1 column 2

@@ -1,0 +1,128 @@
+# Closures: captures, inference, escapes, @compact, and closure-taking list methods.
+
+fn apply(f: fn(int) -> int, x: int) -> int:
+    return f(x)
+
+fn twice[T](f: fn(T) -> T, x: T) -> T:
+    return f(f(x))
+
+fn map_all[T, R](xs: &list[T], f: fn(T) -> R) -> list[R]:
+    var out: list[R] = []
+    for x in xs:
+        out.push(f(x))
+    return out
+
+fn double(x: int) -> int:
+    return x * 2
+
+fn adder(n: int) -> fn(int) -> int:
+    return fn(x) => x + n
+
+fn part1():
+    let k = 10
+    print(apply(fn(x) => x + k, 5))
+    print(apply(double, 4))
+    print(twice(fn(s: str) => s + "!", "hi"))
+    let add3 = adder(3)
+    print(add3(4), adder(100)(1))
+    let name = "silly"
+    let greet = fn(who: str) -> str:
+        return f"{name} says hi to {who}"
+    print(greet("you"))
+    print(map_all(&[1, 2, 3], fn(x) => x * x))
+    print(map_all(&[1, 2, 3], fn(x) => f"<{x}>"))
+    let fs = [fn(x: int) => x + 1, double]
+    print(fs[0](1), fs[1](1))
+    print(greet == greet)
+
+
+@compact
+fn make(n: int) -> list[fn(int) -> str]:
+    var out: list[fn(int) -> str] = []
+    for i in 0..n:
+        let tag = f"t{i}"
+        let junk = [1, 2, 3, 4, 5, 6, 7, 8]
+        out.push(fn(x: int) => f"{tag}:{x + len(junk)}")
+    return out
+
+fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int:
+    return fn(x) => g(f(x))
+
+fn part2():
+    let fs = make(3)
+    for f in fs:
+        print(f(1))
+    var total = 0
+    for i in 0..100000:
+        let s = f"{i}"
+        let f = fn(x: int) => x + len(s)
+        total += f(1)
+    print(total)
+    let h = compose(fn(x) => x + 1, fn(x) => x * 10)
+    print(h(2))
+    var counter = fn(x: int) => x
+    for i in 0..3:
+        let m = [i, i]
+        counter = fn(x: int) => x + m[0]
+    print(counter(5))
+
+
+struct P:
+    name: str
+    age: int
+
+fn part3():
+    let xs = [3, 1, 4, 1, 5, 9, 2, 6]
+    print(xs.map(fn(x) => x * 10))
+    print(xs.filter(fn(x) => x % 2 == 0))
+    print(xs.any(fn(x) => x > 8), xs.all(fn(x) => x > 0), xs.count_by(fn(x) => x == 1))
+    print(xs.position(fn(x) => x == 5), xs.position(fn(x) => x == 7))
+    print(xs.fold(0, fn(a, x) => a + x))
+    let words = ["pear", "fig", "banana", "kiwi"]
+    print(words.map(fn(w) => len(w)))
+    print(words.filter(fn(w) => w.contains("i")))
+    print(words.fold("", fn(acc, w) => acc + w[0:1]))
+    var ws = words.clone()
+    ws.sort_by(fn(w) => len(w))
+    print(ws)
+    var ps = [P("bo", 30), P("al", 25), P("cy", 30), P("di", 20)]
+    ps.sort_by(fn(p) => -p.age)
+    ps.each(fn(p) => print(p.name, p.age))
+    let lim = 22
+    print(ps.filter(fn(p) => p.age > lim).map(fn(p) => p.name.upper()))
+
+
+fn main():
+    part1()
+    part2()
+    part3()
+
+#> 15
+#> 8
+#> hi!!
+#> 7 101
+#> silly says hi to you
+#> [1, 4, 9]
+#> ["<1>", "<2>", "<3>"]
+#> 2 2
+#> true
+#> t0:9
+#> t1:9
+#> t2:9
+#> 588890
+#> 30
+#> 7
+#> [30, 10, 40, 10, 50, 90, 20, 60]
+#> [4, 2, 6]
+#> true true 2
+#> Some(4) None
+#> 31
+#> [4, 3, 6, 4]
+#> ["fig", "kiwi"]
+#> pfbk
+#> ["fig", "pear", "kiwi", "banana"]
+#> bo 30
+#> cy 30
+#> al 25
+#> di 20
+#> ["BO", "CY", "AL"]

@@ -1,0 +1,5 @@
+# error: spawn() needs a function that takes no arguments
+fn f(x: int) -> int:
+    return x
+fn main():
+    let t = spawn(f)

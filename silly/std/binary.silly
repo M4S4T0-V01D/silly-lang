@@ -1,0 +1,447 @@
+# Packing numbers into bytes and back, like Python's struct (which is a keyword
+# here), plus typed Writer and Reader for building and walking binary data.
+#
+#     import binary
+#     from binary import Value
+#     fn main():
+#         let b = binary.pack(&"<HId", &[Value.Int(1), Value.Int(2), Value.Float(0.5)]).unwrap()
+#         print(len(b), binary.calcsize(&"<HId").unwrap())          # 14 14
+#         let v = binary.unpack(&"<HId", &b).unwrap()
+#         var w = binary.writer()
+#         w.u32_be(0xCAFEBABE)
+#         w.str(&"hi")
+#         var r = binary.reader(&w.bytes())
+#         print(r.u32_be().unwrap(), r.take(2).unwrap())
+#
+# Formats: the first character picks the byte order: "<" little-endian, ">" or
+# "!" big-endian, "=" this machine's order, "@" (the default) this machine's
+# order, sizes and alignment. Then: x pad byte, c char (1 byte), b/B 8-bit,
+# ?  bool, h/H 16-bit, i/I and l/L 32-bit (l/L are 64-bit with "@"), q/Q 64-bit,
+# n/N 64-bit ("@" only), f float, d double, s bytes. A count before a letter
+# repeats it ("3h"); before "s" it's the length ("10s", padded with zeros).
+#
+# Silly's int is 64-bit and signed, so Q and N values of 2**63 and up come back
+# negative (the same bits); pack takes any int for them.
+
+extern "binary.c"
+
+extern fn bn_f64_bits(x: f64) -> int
+extern fn bn_f64_from_bits(b: int) -> f64
+extern fn bn_f32_bits(x: f64) -> int
+extern fn bn_f32_from_bits(b: int) -> f64
+
+# The 64 bits of a double, as an int.
+fn f64_bits(x: f64) -> int:
+    return bn_f64_bits(x)
+
+# The f64 whose IEEE 754 bits are b.
+fn f64_from_bits(b: int) -> f64:
+    return bn_f64_from_bits(b)
+
+# The 32 bits of x rounded to a float.
+fn f32_bits(x: f64) -> int:
+    return bn_f32_bits(x)
+
+# The f32 whose IEEE 754 bits are the low 32 of b, widened to f64.
+fn f32_from_bits(b: int) -> f64:
+    return bn_f32_from_bits(b)
+
+# One packed value.
+enum Value:
+    Int(int)
+    Float(f64)
+    Bool(bool)
+    Bytes(list[u8])                 # for "s" and "c"
+
+    fn str(self) -> str:
+        match self:
+            case Int(n): return str(n)
+            case Float(f): return str(f)
+            case Bool(b): return "True" if b else "False"
+            case Bytes(b): return "b" + str(b)
+
+    fn int(self) -> int:
+        match self:
+            case Int(n): return n
+            case Bool(b): return 1 if b else 0
+            case Float(f): return f as int
+            case Bytes(_): return 0
+
+    fn float(self) -> f64:
+        match self:
+            case Float(f): return f
+            case Int(n): return n as f64
+            case Bool(b): return 1.0 if b else 0.0
+            case Bytes(_): return 0.0
+
+    fn bytes(self) -> list[u8]:
+        match self:
+            case Bytes(b): return b.clone()
+            case _: return []
+
+# ---- integers <-> bytes ----
+
+fn _put(out: &mut list[u8], v: int, size: int, little: bool):
+    for k in 0..size:
+        let shift = 8 * (k if little else size - 1 - k)
+        out.push(((v >> shift) & 255) as u8)
+
+fn _get(b: &list[u8], at: int, size: int, little: bool, signed: bool) -> int:
+    var v = 0
+    for k in 0..size:
+        let byte = b[at + (size - 1 - k if little else k)] as int
+        v = (v << 8) | byte
+    if signed and size < 8 and v >= 1 << (8 * size - 1):
+        v -= 1 << (8 * size)
+    return v
+
+# ---- format strings ----
+
+struct _Item:
+    code: char
+    count: int                      # repeats, or the length for 's'
+    size: int
+    align: int
+
+struct _Format:
+    little: bool
+    items: list[_Item]
+    total: int
+
+fn _size(c: char, native: bool) -> int:
+    if c == 'x' or c == 'c' or c == 'b' or c == 'B' or c == '?' or c == 's':
+        return 1
+    if c == 'h' or c == 'H':
+        return 2
+    if c == 'i' or c == 'I' or c == 'f':
+        return 4
+    if c == 'l' or c == 'L':
+        return 8 if native else 4
+    if c == 'q' or c == 'Q' or c == 'd':
+        return 8
+    if (c == 'n' or c == 'N') and native:
+        return 8
+    return -1
+
+fn _parse(fmt: &str) -> Result[_Format, str]:
+    let cs = fmt.chars()
+    var i = 0
+    var little = true                # x86-64 and arm64 Linux, macOS
+    var native = true
+    if len(cs) > 0 and "<>!=@".contains(str(cs[0])):
+        let o = cs[0]
+        little = o == '<' or o == '=' or o == '@'
+        native = o == '@'
+        i = 1
+    var items: list[_Item] = []
+    var total = 0
+    while i < len(cs):
+        let c = cs[i]
+        if c.is_space():
+            i += 1
+            continue
+        var count = 1
+        if c.is_digit():
+            count = 0
+            while i < len(cs) and cs[i].is_digit():
+                count = count * 10 + (ord(cs[i]) - 48)
+                i += 1
+            if i == len(cs):
+                return Err("repeat count given without format specifier")
+        let code = cs[i]
+        i += 1
+        let size = _size(code, native)
+        if size < 0:
+            return Err("bad char in struct format")
+        let align = size if native and code != 's' else 1
+        if total % align != 0:
+            total += align - total % align
+        total += size * count
+        items.push(_Item(code, count, size, align))
+    return Ok(_Format(little, items, total))
+
+# The number of bytes a format packs to.
+fn calcsize(fmt: &str) -> Result[int, str]:
+    return Ok(_parse(fmt)?.total)
+
+# How many values a format takes (pad bytes take none; "10s" takes one).
+fn _arity(f: &_Format) -> int:
+    var n = 0
+    for it in f.items:
+        if it.code == 's':
+            n += 1
+        elif it.code != 'x':
+            n += it.count
+    return n
+
+fn _range_err(code: char, lo: int, hi: int) -> str:
+    return "'" + str(code) + "' format requires " + str(lo) + " <= number <= " + str(hi)
+
+# The bytes for values packed by the format.
+fn pack(fmt: &str, values: &list[Value]) -> Result[list[u8], str]:
+    let f = _parse(fmt)?
+    let want = _arity(&f)
+    if len(values) != want:
+        return Err("pack expected " + str(want) + " items for packing (got " + str(len(values)) + ")")
+    var out: list[u8] = []
+    var vi = 0
+    for it in f.items:
+        while len(out) % it.align != 0:
+            out.push(0 as u8)
+        if it.code == 's':
+            let b = values[vi].bytes()
+            vi += 1
+            for k in 0..it.count:
+                out.push(b[k] if k < len(b) else 0 as u8)
+            continue
+        for _ in 0..it.count:
+            let c = it.code
+            if c == 'x':
+                out.push(0 as u8)
+                continue
+            let v = values[vi].clone()
+            vi += 1
+            if c == 'c':
+                let b = v.bytes()
+                if len(b) != 1:
+                    return Err("char format requires a bytes object of length 1")
+                out.push(b[0])
+            elif c == 'f':
+                _put(&mut out, bn_f32_bits(v.float()), 4, f.little)
+            elif c == 'd':
+                _put(&mut out, bn_f64_bits(v.float()), 8, f.little)
+            elif c == '?':
+                out.push((0 if v.int() == 0 else 1) as u8)
+            else:
+                match v:
+                    case Int(_): pass
+                    case Bool(_): pass
+                    case _: return Err("required argument is not an integer")
+                let n = v.int()
+                let bits = 8 * it.size
+                let signed = "bhilqn".contains(str(c))
+                if bits < 64:
+                    let lo = -(1 << (bits - 1)) if signed else 0
+                    let hi = (1 << (bits - 1)) - 1 if signed else (1 << bits) - 1
+                    if n < lo or n > hi:
+                        return Err(_range_err(c, lo, hi))
+                _put(&mut out, n, it.size, f.little)
+    return Ok(out)
+
+# The values in bytes packed by the format; the length must match exactly.
+fn unpack(fmt: &str, data: &list[u8]) -> Result[list[Value], str]:
+    let f = _parse(fmt)?
+    if len(data) != f.total:
+        return Err("unpack requires a buffer of " + str(f.total) + " bytes")
+    return Ok(_unpack_at(&f, data, 0))
+
+# Like unpack, reading from offset on and ignoring any bytes after.
+fn unpack_from(fmt: &str, data: &list[u8], offset: int) -> Result[list[Value], str]:
+    let f = _parse(fmt)?
+    if offset < 0 or len(data) - offset < f.total:
+        return Err("unpack_from requires a buffer of at least " + str(f.total + offset) + " bytes for unpacking " + str(f.total) + " bytes at offset " + str(offset) + " (actual buffer size is " + str(len(data)) + ")")
+    return Ok(_unpack_at(&f, data, offset))
+
+# Every record in data, one format's worth at a time (iter_unpack).
+fn unpack_all(fmt: &str, data: &list[u8]) -> Result[list[list[Value]], str]:
+    let f = _parse(fmt)?
+    if f.total == 0 or len(data) % f.total != 0:
+        return Err("iterative unpacking requires a buffer of a multiple of " + str(f.total) + " bytes")
+    var out: list[list[Value]] = []
+    var at = 0
+    while at < len(data):
+        out.push(_unpack_at(&f, data, at))
+        at += f.total
+    return Ok(out)
+
+fn _unpack_at(f: &_Format, data: &list[u8], start: int) -> list[Value]:
+    var out: list[Value] = []
+    var at = start
+    for it in f.items:
+        while (at - start) % it.align != 0:
+            at += 1
+        if it.code == 's':
+            out.push(Value.Bytes(data[at:at + it.count]))
+            at += it.count
+            continue
+        for _ in 0..it.count:
+            let c = it.code
+            if c == 'c':
+                out.push(Value.Bytes(data[at:at + 1]))
+            elif c == '?':
+                out.push(Value.Bool(data[at] != 0))
+            elif c == 'f':
+                out.push(Value.Float(bn_f32_from_bits(_get(data, at, 4, f.little, false))))
+            elif c == 'd':
+                out.push(Value.Float(bn_f64_from_bits(_get(data, at, 8, f.little, false))))
+            elif c != 'x':
+                out.push(Value.Int(_get(data, at, it.size, f.little, "bhilqn".contains(str(c)))))
+            at += it.size
+    return out
+
+# ---- Writer and Reader ----
+
+# Builds a byte string from packed integers, floats and strings.
+struct Writer:
+    data: list[u8]
+
+    fn bytes(self) -> list[u8]:
+        return self.data.clone()
+
+    fn len(self) -> int:
+        return len(self.data)
+
+    fn u8(mut self, v: int):
+        self.data.push((v & 255) as u8)
+
+    fn u16_le(mut self, v: int):
+        _put(&mut self.data, v, 2, true)
+
+    fn u16_be(mut self, v: int):
+        _put(&mut self.data, v, 2, false)
+
+    fn u32_le(mut self, v: int):
+        _put(&mut self.data, v, 4, true)
+
+    fn u32_be(mut self, v: int):
+        _put(&mut self.data, v, 4, false)
+
+    fn u64_le(mut self, v: int):
+        _put(&mut self.data, v, 8, true)
+
+    fn u64_be(mut self, v: int):
+        _put(&mut self.data, v, 8, false)
+
+    fn f32_le(mut self, x: f64):
+        _put(&mut self.data, bn_f32_bits(x), 4, true)
+
+    fn f32_be(mut self, x: f64):
+        _put(&mut self.data, bn_f32_bits(x), 4, false)
+
+    fn f64_le(mut self, x: f64):
+        _put(&mut self.data, bn_f64_bits(x), 8, true)
+
+    fn f64_be(mut self, x: f64):
+        _put(&mut self.data, bn_f64_bits(x), 8, false)
+
+    # A LEB128 varint (unsigned; as in protobuf and WebAssembly).
+    fn uvarint(mut self, v: int):
+        var n = v
+        while true:
+            let low = n & 0x7f
+            n = (n >> 7) & 0x01ffffffffffffff
+            if n == 0:
+                self.data.push(low as u8)
+                return
+            self.data.push((low | 0x80) as u8)
+
+    fn put(mut self, b: &list[u8]):
+        for x in b:
+            self.data.push(x)
+
+    # The string's UTF-8 bytes (no length, no terminator).
+    fn str(mut self, s: &str):
+        for x in s.bytes():
+            self.data.push(x)
+
+    # Zero bytes up to a multiple of n.
+    fn align(mut self, n: int):
+        while len(self.data) % n != 0:
+            self.data.push(0 as u8)
+
+# An empty Writer.
+fn writer() -> Writer:
+    return Writer([])
+
+# Reads packed values back from bytes, front to back.
+struct Reader:
+    data: list[u8]
+    pos: int
+
+    fn remaining(self) -> int:
+        return len(self.data) - self.pos
+
+    fn at_end(self) -> bool:
+        return self.pos >= len(self.data)
+
+    fn _int(mut self, size: int, little: bool, signed: bool) -> Result[int, str]:
+        if self.remaining() < size:
+            return Err("need " + str(size) + " bytes at offset " + str(self.pos) + ", have " + str(self.remaining()))
+        let v = _get(&self.data, self.pos, size, little, signed)
+        self.pos += size
+        return Ok(v)
+
+    fn u8(mut self) -> Result[int, str]:
+        return self._int(1, true, false)
+
+    fn i8(mut self) -> Result[int, str]:
+        return self._int(1, true, true)
+
+    fn u16_le(mut self) -> Result[int, str]:
+        return self._int(2, true, false)
+
+    fn u16_be(mut self) -> Result[int, str]:
+        return self._int(2, false, false)
+
+    fn i16_le(mut self) -> Result[int, str]:
+        return self._int(2, true, true)
+
+    fn i16_be(mut self) -> Result[int, str]:
+        return self._int(2, false, true)
+
+    fn u32_le(mut self) -> Result[int, str]:
+        return self._int(4, true, false)
+
+    fn u32_be(mut self) -> Result[int, str]:
+        return self._int(4, false, false)
+
+    fn i32_le(mut self) -> Result[int, str]:
+        return self._int(4, true, true)
+
+    fn i32_be(mut self) -> Result[int, str]:
+        return self._int(4, false, true)
+
+    fn u64_le(mut self) -> Result[int, str]:
+        return self._int(8, true, false)
+
+    fn u64_be(mut self) -> Result[int, str]:
+        return self._int(8, false, false)
+
+    fn f32_le(mut self) -> Result[f64, str]:
+        return Ok(bn_f32_from_bits(self._int(4, true, false)?))
+
+    fn f32_be(mut self) -> Result[f64, str]:
+        return Ok(bn_f32_from_bits(self._int(4, false, false)?))
+
+    fn f64_le(mut self) -> Result[f64, str]:
+        return Ok(bn_f64_from_bits(self._int(8, true, false)?))
+
+    fn f64_be(mut self) -> Result[f64, str]:
+        return Ok(bn_f64_from_bits(self._int(8, false, false)?))
+
+    fn uvarint(mut self) -> Result[int, str]:
+        var v = 0
+        var shift = 0
+        while shift < 64:
+            let b = self.u8()?
+            v = v | ((b & 0x7f) << shift)
+            if b & 0x80 == 0:
+                return Ok(v)
+            shift += 7
+        return Err("varint too long")
+
+    # The next n bytes.
+    fn take(mut self, n: int) -> Result[list[u8], str]:
+        if n < 0 or self.remaining() < n:
+            return Err("need " + str(n) + " bytes at offset " + str(self.pos) + ", have " + str(self.remaining()))
+        let b = self.data[self.pos:self.pos + n]
+        self.pos += n
+        return Ok(b)
+
+    fn skip(mut self, n: int) -> Result[bool, str]:
+        self.take(n)?
+        return Ok(true)
+
+# A Reader at the start of data.
+fn reader(data: &list[u8]) -> Reader:
+    return Reader(data.clone(), 0)

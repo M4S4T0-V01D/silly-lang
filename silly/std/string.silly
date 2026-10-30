@@ -1,0 +1,319 @@
+# String constants and the helpers that str's built-in methods leave out.
+#
+#     import string
+#     fn main():
+#         print(string.pad_left("7", 3, '0'), string.center("hi", 6, '*'))   # 007 **hi**
+#         print(string.capwords("hello   silly world"))                        # Hello Silly World
+#         print(string.partition("key=value=x", "="))                         # ("key", "=", "value=x")
+#         print(string.distance("kitten", "sitting"))                         # 3
+
+const ASCII_LOWERCASE: str = "abcdefghijklmnopqrstuvwxyz"
+const ASCII_UPPERCASE: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const ASCII_LETTERS: str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const DIGITS: str = "0123456789"
+const HEXDIGITS: str = "0123456789abcdefABCDEF"
+const OCTDIGITS: str = "01234567"
+const PUNCTUATION: str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+const WHITESPACE: str = " \t\n\r\u{b}\u{c}"
+const PRINTABLE: str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ \t\n\r\u{b}\u{c}"
+
+# ---- padding ----
+
+# The number of characters (code points), where len(s) counts bytes.
+fn width(s: &str) -> int:
+    var n = 0
+    for b in s.bytes():
+        if (b & 0xC0) != 0x80:
+            n += 1
+    return n
+
+# s, n times over.
+fn repeat(s: &str, n: int) -> str:
+    var out = ""
+    for _ in 0..n:
+        out += s
+    return out
+
+# Pads on the left to `w` characters: pad_left("7", 3, '0') == "007".
+fn pad_left(s: &str, w: int, fill: char) -> str:
+    return repeat(&str(fill), w - width(s)) + s
+
+# s padded with fill on the right to w characters.
+fn pad_right(s: &str, w: int, fill: char) -> str:
+    return s + repeat(&str(fill), w - width(s))
+
+# Centers in `w` characters, placing an odd leftover exactly as Python does.
+fn center(s: &str, w: int, fill: char) -> str:
+    let total = w - width(s)
+    if total <= 0:
+        return s.clone()
+    let left = total / 2 + (total & w & 1)
+    let f = str(fill)
+    return repeat(&f, left) + s + repeat(&f, total - left)
+
+# Zero-pads a number string, keeping its sign in front: zfill("-42", 5) == "-0042".
+fn zfill(s: &str, w: int) -> str:
+    if s.starts_with("-") or s.starts_with("+"):
+        return s[0:1] + pad_left(&s[1:], w - 1, '0')
+    return pad_left(s, w, '0')
+
+# ---- case ----
+
+# The first character upper case and the rest lower case.
+fn capitalize(s: &str) -> str:
+    var out = ""
+    var first = true
+    for c in s.chars():
+        out += str(c.upper() if first else c.lower())
+        first = false
+    return out
+
+# Every word capitalized, with runs of whitespace collapsed to one space.
+fn capwords(s: &str) -> str:
+    var words: list[str] = []
+    for w in split_whitespace(s):
+        words.push(capitalize(&w))
+    return " ".join(words)
+
+# Upper case after every non-letter, like Python's str.title().
+fn title(s: &str) -> str:
+    var out = ""
+    var prev_alpha = false
+    for c in s.chars():
+        out += str(c.lower() if prev_alpha else c.upper())
+        prev_alpha = c.is_alpha()
+    return out
+
+# s with ASCII upper and lower case swapped.
+fn swapcase(s: &str) -> str:
+    var out = ""
+    for c in s.chars():
+        if c.is_upper():
+            out += str(c.lower())
+        elif c.is_lower():
+            out += str(c.upper())
+        else:
+            out += str(c)
+    return out
+
+# ---- searching and splitting ----
+
+# The byte index of the last occurrence of `sub`.
+fn rfind(s: &str, sub: &str) -> Option[int]:
+    var i = len(s) - len(sub)
+    while i >= 0:
+        if s[i:i + len(sub)] == sub:
+            return Some(i)
+        i -= 1
+    return None
+
+# The first occurrence of `sub` at or after byte index `start`.
+fn find_from(s: &str, sub: &str, start: int) -> Option[int]:
+    if start > len(s):
+        return None
+    match s[start:].find(sub):
+        case Some(i): return Some(start + i)
+        case None: return None
+
+# Every byte index where `sub` starts (non-overlapping).
+fn find_all(s: &str, sub: &str) -> list[int]:
+    var out: list[int] = []
+    if sub == "":
+        return out
+    var at = 0
+    while true:
+        match find_from(s, sub, at):
+            case Some(i):
+                out.push(i)
+                at = i + len(sub)
+            case None:
+                return out
+    return out
+
+# (before, sep, after) around the first `sep`; (s, "", "") if it isn't there.
+fn partition(s: &str, sep: &str) -> (str, str, str):
+    match s.find(sep):
+        case Some(i): return (s[0:i], sep.clone(), s[i + len(sep):])
+        case None: return (s.clone(), "", "")
+
+# The same around the last `sep`; ("", "", s) if it isn't there.
+fn rpartition(s: &str, sep: &str) -> (str, str, str):
+    match rfind(s, sep):
+        case Some(i): return (s[0:i], sep.clone(), s[i + len(sep):])
+        case None: return ("", "", s.clone())
+
+# Splits on runs of whitespace, dropping empty pieces.
+fn split_whitespace(s: &str) -> list[str]:
+    var out: list[str] = []
+    var start = -1
+    var i = 0
+    for b in s.bytes():
+        let ws = b == 32 or (b >= 9 and b <= 13)
+        if ws and start >= 0:
+            out.push(s[start:i])
+            start = -1
+        elif not ws and start < 0:
+            start = i
+        i += 1
+    if start >= 0:
+        out.push(s[start:])
+    return out
+
+# At most `n` splits, the rest left in the last piece.
+fn splitn(s: &str, sep: &str, n: int) -> list[str]:
+    var out: list[str] = []
+    var rest = s.clone()
+    while len(out) < n:
+        match rest.find(sep):
+            case Some(i):
+                out.push(rest[0:i])
+                rest = rest[i + len(sep):]
+            case None:
+                break
+    out.push(rest)
+    return out
+
+# s without prefix, if it starts with it.
+fn remove_prefix(s: &str, prefix: &str) -> str:
+    if s.starts_with(prefix):
+        return s[len(prefix):]
+    return s.clone()
+
+# s without suffix, if it ends with it.
+fn remove_suffix(s: &str, suffix: &str) -> str:
+    if suffix != "" and s.ends_with(suffix):
+        return s[0:len(s) - len(suffix)]
+    return s.clone()
+
+# Strips any of the characters in `chars` from both ends.
+fn strip_chars(s: &str, chars: &str) -> str:
+    let cs = chars.bytes()
+    let b = s.bytes()
+    var i = 0
+    var j = len(b)
+    while i < j and cs.contains(b[i]):
+        i += 1
+    while j > i and cs.contains(b[j - 1]):
+        j -= 1
+    return s[i:j]
+
+# ---- tests on content ----
+
+# Whether s is non-empty and all ASCII digits.
+fn is_digits(s: &str) -> bool:
+    if s == "":
+        return false
+    for b in s.bytes():
+        if b < 48 or b > 57:
+            return false
+    return true
+
+# Whether s is non-empty and all ASCII letters.
+fn is_alpha(s: &str) -> bool:
+    if s == "":
+        return false
+    for c in s.chars():
+        if not c.is_alpha():
+            return false
+    return true
+
+# Whether s is non-empty and all ASCII letters or digits.
+fn is_alnum(s: &str) -> bool:
+    if s == "":
+        return false
+    for c in s.chars():
+        if not c.is_alnum():
+            return false
+    return true
+
+# Whether s is non-empty and all whitespace.
+fn is_space(s: &str) -> bool:
+    if s == "":
+        return false
+    for c in s.chars():
+        if not c.is_space():
+            return false
+    return true
+
+# A valid name: a letter or _ followed by letters, digits and _.
+fn is_identifier(s: &str) -> bool:
+    if s == "":
+        return false
+    var first = true
+    for c in s.chars():
+        if not (c.is_alpha() or c == '_' or (not first and c.is_digit())):
+            return false
+        first = false
+    return true
+
+# ---- transforming ----
+
+# The characters in reverse order.
+fn reverse(s: &str) -> str:
+    var cs = s.chars()
+    cs.reverse()
+    var out = ""
+    for c in cs:
+        out += str(c)
+    return out
+
+# Replaces each character found in `src` with the one at the same place in `dst`;
+# characters past the end of `dst` are deleted: translate("hello", "lo", "L") == "heLL".
+fn translate(s: &str, src: &str, dst: &str) -> str:
+    let fs = src.chars()
+    let ts = dst.chars()
+    var out = ""
+    for c in s.chars():
+        match fs.index_of(c):
+            case Some(i):
+                if i < len(ts):
+                    out += str(ts[i])
+            case None:
+                out += str(c)
+    return out
+
+# Replaces {name} placeholders from a map; {{ and }} are literal braces.
+# Unknown names are left as they are.
+fn substitute(template: &str, values: &map[str, str]) -> str:
+    var out = ""
+    var i = 0
+    let n = len(template)
+    while i < n:
+        let c = template[i:i + 1]
+        if c == "{" and i + 1 < n and template[i + 1:i + 2] == "{":
+            out += "{"
+            i += 2
+        elif c == "}" and i + 1 < n and template[i + 1:i + 2] == "}":
+            out += "}"
+            i += 2
+        elif c == "{":
+            match find_from(template, "}", i):
+                case Some(j):
+                    let name = template[i + 1:j]
+                    if values.contains(name):
+                        out += values[name]
+                    else:
+                        out += template[i:j + 1]
+                    i = j + 1
+                case None:
+                    out += template[i:]
+                    i = n
+        else:
+            out += c
+            i += 1
+    return out
+
+# The Levenshtein edit distance, in characters.
+fn distance(a: &str, b: &str) -> int:
+    let x = a.chars()
+    let y = b.chars()
+    var prev: list[int] = []
+    for j in 0..len(y) + 1:
+        prev.push(j)
+    for i in 1..len(x) + 1:
+        var cur = [i]
+        for j in 1..len(y) + 1:
+            let cost = 0 if x[i - 1] == y[j - 1] else 1
+            cur.push(min(min(prev[j] + 1, cur[j - 1] + 1), prev[j - 1] + cost))
+        prev = cur
+    return prev[len(y)]

@@ -1,0 +1,8 @@
+#! exit 101
+#! stderr index 5 is out of range for length 3
+fn main():
+    let xs = [1, 2, 3]
+    var i = 5
+    print("before")
+    print(xs[i])
+#> before

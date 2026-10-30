@@ -1,0 +1,73 @@
+# url: split, quote, query strings, urljoin (matches urllib.parse)
+
+import url
+
+fn main():
+    let u = url.parse(&"HTTPS://user:pw@Example.COM:8080/a/b;p?q=1&x=two+3&e=%C3%A9#top")
+    print(u.scheme, u.netloc, u.path, u.query, u.fragment)
+    print(u.host(), u.port(), u.username(), u.password(), u.str())
+    print(u.params())
+    let v6 = url.parse(&"http://[::1]:80/")
+    print(v6.host(), v6.port(), url.parse(&"http://h/").port())
+    for s in ["mailto:me@x.org", "/just/a/path?x", "//host/p", "file:///etc/hosts", "a:b", "rel/p#f", "c++:x"]:
+        let p = url.parse(&s)
+        print(s, "|", p.scheme, "|", p.netloc, "|", p.path, "|", p.query, "|", p.fragment, "|", p.str())
+    print(url.quote(&"a b/c?d=é&"), url.quote_plus(&"a b/c?d=é&"), url.quote_safe(&"a b/c", &""))
+    print(url.unquote(&"a%20b%2fc%C3%A9+x%zz%4"), url.unquote_plus(&"a+b%2B"))
+    print(url.parse_qsl(&"a=1&&b=x+y&a=%32&c"))
+    let qs = url.parse_qs(&"a=1&b=2&a=3")
+    print(qs["a"], qs["b"])
+    print(url.urlencode(&[("q", "silly lang"), ("k&", "=é")]))
+    let base = "http://a/b/c/d;p?q"
+    for r in ["g:h", "g", "./g", "g/", "/g", "//g", "?y", "g?y", "#s", "g#s", "g?y#s", ";x", "g;x", "", ".", "./", "..", "../", "../g", "../..", "../../", "../../g", "../../../g", "/./g", "/../g", "g.", ".g", "g..", "..g", "./../g", "./g/.", "g/./h", "g/../h"]:
+        print(r, url.urljoin(&base, &r))
+
+#> https user:pw@Example.COM:8080 /a/b;p q=1&x=two+3&e=%C3%A9 top
+#> example.com 8080 user pw https://user:pw@Example.COM:8080/a/b;p?q=1&x=two+3&e=%C3%A9#top
+#> [("q", "1"), ("x", "two 3"), ("e", "é")]
+#> ::1 80 -1
+#> mailto:me@x.org | mailto |  | me@x.org |  |  | mailto:me@x.org
+#> /just/a/path?x |  |  | /just/a/path | x |  | /just/a/path?x
+#> //host/p |  | host | /p |  |  | //host/p
+#> file:///etc/hosts | file |  | /etc/hosts |  |  | file:///etc/hosts
+#> a:b | a |  | b |  |  | a:b
+#> rel/p#f |  |  | rel/p |  | f | rel/p#f
+#> c++:x | c++ |  | x |  |  | c++:x
+#> a%20b/c%3Fd%3D%C3%A9%26 a+b%2Fc%3Fd%3D%C3%A9%26 a%20b%2Fc
+#> a b/cé+x%zz%4 a b+
+#> [("a", "1"), ("b", "x y"), ("a", "2"), ("c", "")]
+#> ["1", "3"] ["2"]
+#> q=silly+lang&k%26=%3D%C3%A9
+#> g:h g:h
+#> g http://a/b/c/g
+#> ./g http://a/b/c/g
+#> g/ http://a/b/c/g/
+#> /g http://a/g
+#> //g http://g
+#> ?y http://a/b/c/d;p?y
+#> g?y http://a/b/c/g?y
+#> #s http://a/b/c/d;p?q#s
+#> g#s http://a/b/c/g#s
+#> g?y#s http://a/b/c/g?y#s
+#> ;x http://a/b/c/;x
+#> g;x http://a/b/c/g;x
+#>  http://a/b/c/d;p?q
+#> . http://a/b/c/
+#> ./ http://a/b/c/
+#> .. http://a/b/
+#> ../ http://a/b/
+#> ../g http://a/b/g
+#> ../.. http://a/
+#> ../../ http://a/
+#> ../../g http://a/g
+#> ../../../g http://a/g
+#> /./g http://a/g
+#> /../g http://a/g
+#> g. http://a/b/c/g.
+#> .g http://a/b/c/.g
+#> g.. http://a/b/c/g..
+#> ..g http://a/b/c/..g
+#> ./../g http://a/b/g
+#> ./g/. http://a/b/c/g/
+#> g/./h http://a/b/c/g/h
+#> g/../h http://a/b/c/h

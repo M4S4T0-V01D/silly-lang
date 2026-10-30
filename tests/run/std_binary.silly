@@ -1,0 +1,86 @@
+# binary: pack/unpack like struct, Writer/Reader, float bits
+
+import binary
+from binary import Value
+
+fn hex(b: &list[u8]) -> str:
+    var s = ""
+    for x in b:
+        let d = "0123456789abcdef"
+        s += d[(x as int) / 16:(x as int) / 16 + 1] + d[(x as int) % 16:(x as int) % 16 + 1]
+    return s
+
+fn show(vs: &list[Value]) -> str:
+    var parts: list[str] = []
+    for v in vs:
+        parts.push(v.str())
+    return "(" + ", ".join(parts) + ")"
+
+fn main():
+    for f in ["<HId", "@bhiq", "@cid", ">3h2s?", "=lL", "@lL", "@bd", "!Q", "@xxi", "5x", "@?Hf", "@n"]:
+        print(f, binary.calcsize(&f).unwrap())
+    let b = binary.pack(&"<HId", &[Value.Int(1), Value.Int(2), Value.Float(0.5)]).unwrap()
+    print(hex(&b), show(&binary.unpack(&"<HId", &b).unwrap()))
+    let c = binary.pack(&">3h2s?", &[Value.Int(-1), Value.Int(300), Value.Int(-32768), Value.Bytes("hey".bytes()), Value.Bool(true)]).unwrap()
+    print(hex(&c), show(&binary.unpack(&">3h2s?", &c).unwrap()))
+    let d = binary.pack(&"@bhiq", &[Value.Int(-2), Value.Int(-3), Value.Int(-4), Value.Int(-5)]).unwrap()
+    print(hex(&d), show(&binary.unpack(&"@bhiq", &d).unwrap()))
+    let e = binary.pack(&"<fdQ", &[Value.Float(3.14159), Value.Float(-0.0), Value.Int(-1)]).unwrap()
+    print(hex(&e), show(&binary.unpack(&"<fdQ", &e).unwrap()))
+    print(binary.pack(&"<h", &[Value.Int(40000)]).unwrap_err())
+    print(binary.pack(&"<B", &[Value.Int(-1)]).unwrap_err())
+    print(binary.pack(&"<hh", &[Value.Int(1)]).unwrap_err())
+    print(binary.pack(&"<h", &[Value.Float(1.0)]).unwrap_err())
+    print(binary.unpack(&"<i", &[1 as u8]).unwrap_err())
+    print(binary.calcsize(&"<z").unwrap_err(), binary.calcsize(&"<3").unwrap_err())
+    print(show(&binary.unpack_from(&">H", &[9 as u8, 1 as u8, 2 as u8, 7 as u8], 1).unwrap()))
+    print(binary.unpack_from(&">I", &[9 as u8, 1 as u8], 1).unwrap_err())
+    for r in binary.unpack_all(&"<bB", &[255 as u8, 255 as u8, 1 as u8, 2 as u8]).unwrap():
+        print(show(&r))
+    print(binary.f64_bits(1.0) == 0x3FF0000000000000, binary.f32_bits(1.0), binary.f64_from_bits(0x4000000000000000))
+    var w = binary.writer()
+    w.u32_be(0xCAFEBABE)
+    w.u16_le(0x1234)
+    w.f64_be(2.5)
+    w.uvarint(300)
+    w.uvarint(0)
+    w.str(&"hi")
+    w.align(4)
+    print(hex(&w.bytes()), w.len())
+    var r = binary.reader(&w.bytes())
+    print(r.u32_be().unwrap(), r.u16_le().unwrap(), r.f64_be().unwrap(), r.uvarint().unwrap(), r.uvarint().unwrap(), r.take(2).unwrap(), r.remaining())
+    print(r.skip(1).is_ok(), r.u32_le().unwrap_err())
+    var s = binary.reader(&[0xff as u8, 0xfe as u8, 0xff as u8])
+    print(s.i8().unwrap(), s.i16_be().unwrap(), s.at_end())
+
+#> <HId 14
+#> @bhiq 16
+#> @cid 16
+#> >3h2s? 9
+#> =lL 8
+#> @lL 16
+#> @bd 16
+#> !Q 8
+#> @xxi 8
+#> 5x 5
+#> @?Hf 8
+#> @n 8
+#> 010002000000000000000000e03f (1, 2, 0.5)
+#> ffff012c8000686501 (-1, 300, -32768, b[104, 101], True)
+#> fe00fdfffcfffffffbffffffffffffff (-2, -3, -4, -5)
+#> d00f49400000000000000080ffffffffffffffff (3.141590118408203, -0.0, -1)
+#> 'h' format requires -32768 <= number <= 32767
+#> 'B' format requires 0 <= number <= 255
+#> pack expected 2 items for packing (got 1)
+#> required argument is not an integer
+#> unpack requires a buffer of 4 bytes
+#> bad char in struct format repeat count given without format specifier
+#> (258)
+#> unpack_from requires a buffer of at least 5 bytes for unpacking 4 bytes at offset 1 (actual buffer size is 2)
+#> (-1, 255)
+#> (1, 2)
+#> true 1065353216 2.0
+#> cafebabe34124004000000000000ac0200686900 20
+#> 3405691582 4660 2.5 300 0 [104, 105] 1
+#> true need 4 bytes at offset 20, have 0
+#> -1 -257 true

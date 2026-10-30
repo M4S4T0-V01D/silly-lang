@@ -1,0 +1,15 @@
+# Small strings: format records, split them apart and parse the numbers back.
+
+fn main():
+    let a = args()
+    let n = a[1].parse_int().unwrap() if len(a) > 1 else 100000
+    var total = 0
+    var chars = 0
+    for i in 0..n:
+        let rec = f"id{i}:{i * 7 % 1000}:{i % 13}"
+        chars += len(rec)
+        let parts = rec.split(":")
+        total += parts[1].parse_int().unwrap() * parts[2].parse_int().unwrap()
+        if parts[0].ends_with("99"):
+            total += 1
+    print(total, chars)

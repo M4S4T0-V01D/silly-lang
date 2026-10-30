@@ -1,0 +1,7 @@
+# error: 'Show' is a trait, not a type
+trait Show:
+    fn show(self) -> str
+fn f(x: Show):
+    return
+fn main():
+    return

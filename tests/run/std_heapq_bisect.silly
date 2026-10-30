@@ -1,0 +1,48 @@
+# heapq and bisect
+
+import heapq
+import bisect
+
+fn main():
+    var h: list[int] = []
+    for x in [5, 1, 4, 2, 8, 0, 3]:
+        heapq.push(&mut h, x)
+    print(heapq.peek(&h), len(h))
+    var out: list[int] = []
+    while true:
+        match heapq.pop(&mut h):
+            case Some(x): out.push(x)
+            case None: break
+    print(out)
+    var t: list[(int, str)] = []
+    heapq.push(&mut t, (3, "low"))
+    heapq.push(&mut t, (1, "urgent"))
+    heapq.push(&mut t, (2, "normal"))
+    print(heapq.pop(&mut t), heapq.pop(&mut t))
+    var g = [9, 7, 5, 3, 1, 8, 6]
+    heapq.heapify(&mut g)
+    print(g[0], heapq.pushpop(&mut g, 0), heapq.pushpop(&mut g, 4), heapq.replace(&mut g, 10))
+    print(heapq.nsmallest(&[9, 3, 7, 1], 2), heapq.nlargest(&[9, 3, 7, 1], 3))
+    print(heapq.merge(&[[1, 4, 7], [2, 5], [0, 9]]))
+    var ws = ["pear", "apple", "fig"]
+    heapq.heapify(&mut ws)
+    print(heapq.pop(&mut ws))
+
+    var xs = [1, 3, 3, 7]
+    print(bisect.left(&xs, &3), bisect.right(&xs, &3), bisect.left(&xs, &0), bisect.right(&xs, &9))
+    bisect.insort(&mut xs, 5)
+    bisect.insort_left(&mut xs, 3)
+    print(xs, bisect.index(&xs, &7), bisect.index(&xs, &4), bisect.count(&xs, &3))
+    let names = ["ann", "bob", "eve"]
+    print(bisect.left(&names, &"bob"), bisect.index(&names, &"zed"))
+
+#> Some(0) 7
+#> [0, 1, 2, 3, 4, 5, 8]
+#> Some((1, "urgent")) Some((2, "normal"))
+#> 1 0 1 Some(3)
+#> [1, 3] [9, 7, 3]
+#> [0, 1, 2, 4, 5, 7, 9]
+#> Some("apple")
+#> 1 3 0 4
+#> [1, 3, 3, 3, 5, 7] Some(5) None 3
+#> 1 None

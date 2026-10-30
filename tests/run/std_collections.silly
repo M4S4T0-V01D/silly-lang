@@ -1,0 +1,48 @@
+# Counter, Deque, group_by, chunks
+
+import collections
+
+fn main():
+    var c = collections.counter(&"mississippi".chars())
+    print(c.most_common(2), c.get('s'), c.get('z'), c.total(), c.len())
+    c.add('z', 5)
+    print(c.most_common(1), c.elements().len())
+    var w: collections.Counter[str] = collections.Counter.new()
+    for word in "the cat and the hat and the bat".split(" "):
+        w.add(word, 1)
+    print(w.most_common(3))
+
+    var d: collections.Deque[int] = collections.Deque.new()
+    for i in 0..5:
+        d.push_back(i)
+    d.push_front(-1)
+    print(d.to_list(), d.len(), d.at(0), d.at(5))
+    print(d.pop_front(), d.pop_front(), d.pop_back())
+    var got: list[int] = []
+    while not d.is_empty():
+        got.push(d.pop_front().unwrap())
+    print(got, d.pop_back(), d.pop_front())
+    var e = collections.Deque.from_list(["a", "b", "c", "d"])
+    print(e.pop_front(), e.pop_back(), e.pop_front(), e.pop_back(), e.pop_back())
+    for i in 0..6:
+        e.push_front(str(i))
+    print(e.pop_back(), e.at(0), e.to_list())
+
+    print(collections.group_by(&[1, 1, 2, 3, 3, 3, 1], fn(x) => x))
+    print(collections.group_by(&["apple", "avocado", "banana", "cherry", "cranberry"], fn(s) => s[0:1]))
+    print(collections.chunks(&[1, 2, 3, 4, 5], 2), collections.chunks(&[1], 3))
+    var c2 = collections.counter(&"mississippi".chars())
+    print(c2.most_common(2))
+
+#> [('i', 4), ('s', 4)] 4 0 11 4
+#> [('z', 5)] 16
+#> [("the", 3), ("and", 2), ("cat", 1)]
+#> [-1, 0, 1, 2, 3, 4] 6 -1 4
+#> Some(-1) Some(0) Some(4)
+#> [1, 2, 3] None None
+#> Some("a") Some("d") Some("b") Some("c") None
+#> Some("0") 5 ["5", "4", "3", "2", "1"]
+#> [(1, [1, 1]), (2, [2]), (3, [3, 3, 3]), (1, [1])]
+#> [("a", ["apple", "avocado"]), ("b", ["banana"]), ("c", ["cherry", "cranberry"])]
+#> [[1, 2], [3, 4], [5]] [[1]]
+#> [('i', 4), ('s', 4)]

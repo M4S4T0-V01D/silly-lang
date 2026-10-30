@@ -1,0 +1,259 @@
+# Pseudo-random numbers, like Python's random module.
+#
+#     import random
+#     fn main():
+#         print(random.randint(1, 6), random.random())
+#         var deck = ["A", "K", "Q", "J"]
+#         random.shuffle(&mut deck)
+#         print(random.choice(&deck))
+#         var rng = random.Rng.new(42)     # a reproducible stream of its own
+#         print(rng.randint(1, 100))
+#
+# The module-level functions share one generator per thread, seeded from the OS;
+# random.seed(n) makes them repeatable. Both use xoshiro256**, which is fast and
+# good for simulations and games but not for secrets: use token_hex/os_bytes for those.
+
+extern "random.c"
+
+extern fn rnd_seed(seed: int)
+extern fn rnd_next() -> int
+extern fn rnd_os_u64() -> int
+
+# Anything that produces uniformly random 64-bit values.
+trait Source:
+    fn next_u64(mut self) -> int
+
+struct _Global:
+    unused: bool
+
+impl Source for _Global:
+    fn next_u64(mut self) -> int:
+        return rnd_next()
+
+# A seedable generator with its own state.
+struct Rng:
+    s0: u64
+    s1: u64
+    s2: u64
+    s3: u64
+
+    fn new(seed: int) -> Rng:
+        var x = seed as u64
+        let a = _splitmix(&mut x)
+        let b = _splitmix(&mut x)
+        let c = _splitmix(&mut x)
+        let d = _splitmix(&mut x)
+        return Rng(a, b, c, d)
+
+    # A generator seeded from the operating system.
+    fn from_os() -> Rng:
+        return Rng.new(rnd_os_u64())
+
+    fn random(mut self) -> f64:
+        return _random(&mut self)
+
+    fn uniform(mut self, a: f64, b: f64) -> f64:
+        return a + (b - a) * _random(&mut self)
+
+    fn randint(mut self, a: int, b: int) -> int:
+        return _randint(&mut self, a, b)
+
+    fn randrange(mut self, a: int, b: int) -> int:
+        return _randint(&mut self, a, b - 1)
+
+    fn chance(mut self, p: f64) -> bool:
+        return _random(&mut self) < p
+
+    fn gauss(mut self, mu: f64, sigma: f64) -> f64:
+        return _gauss(&mut self, mu, sigma)
+
+    fn expovariate(mut self, lambd: f64) -> f64:
+        return _expo(&mut self, lambd)
+
+    fn weighted(mut self, weights: &list[f64]) -> int:
+        return _weighted(&mut self, weights)
+
+    fn choice[T](mut self, xs: &list[T]) -> T:
+        return xs[_randint(&mut self, 0, len(xs) - 1)].clone()
+
+    fn shuffle[T](mut self, xs: &mut list[T]):
+        _shuffle(&mut self, &mut xs)
+
+    fn sample[T](mut self, xs: &list[T], k: int) -> list[T]:
+        return _sample(&mut self, xs, k)
+
+impl Source for Rng:
+    fn next_u64(mut self) -> int:
+        let r = _rotl(self.s1 * 5, 7) * 9
+        let t = self.s1 << 17
+        self.s2 = self.s2 ^ self.s0
+        self.s3 = self.s3 ^ self.s1
+        self.s1 = self.s1 ^ self.s2
+        self.s0 = self.s0 ^ self.s3
+        self.s2 = self.s2 ^ t
+        self.s3 = _rotl(self.s3, 45)
+        return r as int
+
+fn _splitmix(x: &mut u64) -> u64:
+    x = x + (0x9E3779B97F4A7C15 as u64)
+    var z = x
+    z = (z ^ (z >> 30)) * (0xBF58476D1CE4E5B9 as u64)
+    z = (z ^ (z >> 27)) * (0x94D049BB133111EB as u64)
+    return z ^ (z >> 31)
+
+fn _rotl(x: u64, k: u64) -> u64:
+    return (x << k) | (x >> (64 - k))
+
+# ---- the algorithms, for any Source ----
+
+fn _random[S: Source](s: &mut S) -> f64:
+    let bits = (s.next_u64() as u64) >> 11
+    return (bits as f64) * (1.0 / 9007199254740992.0)
+
+# Uniform in a..=b, without modulo bias.
+fn _randint[S: Source](s: &mut S, a: int, b: int) -> int:
+    if b < a:
+        panic(f"randint: empty range {a}..={b}")
+    let span = ((b - a) as u64) + 1
+    if span == 0:
+        return s.next_u64()
+    let limit = (0 as u64) - ((0 as u64) - span) % span
+    while true:
+        let r = s.next_u64() as u64
+        if limit == 0 or r < limit:
+            return a + ((r % span) as int)
+    return a
+
+fn _gauss[S: Source](s: &mut S, mu: f64, sigma: f64) -> f64:
+    # Box-Muller; 1 - u keeps the log away from zero
+    let u = 1.0 - _random(&mut s)
+    let v = _random(&mut s)
+    return mu + sigma * (-2.0 * _ln(u)).sqrt() * _cos(6.283185307179586 * v)
+
+fn _expo[S: Source](s: &mut S, lambd: f64) -> f64:
+    return -_ln(1.0 - _random(&mut s)) / lambd
+
+fn _weighted[S: Source](s: &mut S, weights: &list[f64]) -> int:
+    var total = 0.0
+    for w in weights:
+        total += w
+    if len(weights) == 0 or total <= 0.0:
+        panic("weighted: the weights must have a positive sum")
+    var x = _random(&mut s) * total
+    for i in 0..len(weights):
+        x -= weights[i]
+        if x < 0.0:
+            return i
+    return len(weights) - 1
+
+fn _shuffle[S: Source, T](s: &mut S, xs: &mut list[T]):
+    var i = len(xs) - 1
+    while i > 0:
+        let j = _randint(&mut s, 0, i)
+        xs.swap(i, j)
+        i -= 1
+
+fn _sample[S: Source, T](s: &mut S, xs: &list[T], k: int) -> list[T]:
+    if k < 0 or k > len(xs):
+        panic(f"sample: cannot take {k} items from {len(xs)}")
+    var idx: list[int] = []
+    for i in 0..len(xs):
+        idx.push(i)
+    var out: list[T] = []
+    for i in 0..k:
+        let j = _randint(&mut s, i, len(xs) - 1)
+        idx.swap(i, j)
+        out.push(xs[idx[i]].clone())
+    return out
+
+extern fn log(x: f64) -> f64
+extern fn cos(x: f64) -> f64
+
+fn _ln(x: f64) -> f64:
+    return log(x)
+
+fn _cos(x: f64) -> f64:
+    return cos(x)
+
+# ---- the shared per-thread generator ----
+
+# Restarts the shared generator from a seed, making later calls repeatable.
+fn seed(n: int):
+    rnd_seed(n)
+
+# A float in [0, 1).
+fn random() -> f64:
+    var g = _Global(false)
+    return _random(&mut g)
+
+# A float between a and b.
+fn uniform(a: f64, b: f64) -> f64:
+    var g = _Global(false)
+    return a + (b - a) * _random(&mut g)
+
+# An int in a..=b (both ends included).
+fn randint(a: int, b: int) -> int:
+    var g = _Global(false)
+    return _randint(&mut g, a, b)
+
+# An int in a..b (b excluded).
+fn randrange(a: int, b: int) -> int:
+    var g = _Global(false)
+    return _randint(&mut g, a, b - 1)
+
+# True with probability p.
+fn chance(p: f64) -> bool:
+    var g = _Global(false)
+    return _random(&mut g) < p
+
+# A normally distributed float.
+fn gauss(mu: f64, sigma: f64) -> f64:
+    var g = _Global(false)
+    return _gauss(&mut g, mu, sigma)
+
+# An exponentially distributed number with rate lambd (mean 1/lambd).
+fn expovariate(lambd: f64) -> f64:
+    var g = _Global(false)
+    return _expo(&mut g, lambd)
+
+# An index into `weights`, chosen in proportion to them.
+fn weighted(weights: &list[f64]) -> int:
+    var g = _Global(false)
+    return _weighted(&mut g, weights)
+
+# A random element (a copy of it).
+fn choice[T](xs: &list[T]) -> T:
+    if len(xs) == 0:
+        panic("choice: empty list")
+    var g = _Global(false)
+    return xs[_randint(&mut g, 0, len(xs) - 1)].clone()
+
+# Shuffles a list in place.
+fn shuffle[T](xs: &mut list[T]):
+    var g = _Global(false)
+    _shuffle(&mut g, &mut xs)
+
+# k distinct elements, in random order.
+fn sample[T](xs: &list[T], k: int) -> list[T]:
+    var g = _Global(false)
+    return _sample(&mut g, xs, k)
+
+# A random 64-bit value straight from the operating system (suitable for secrets).
+fn os_u64() -> int:
+    return rnd_os_u64()
+
+# 2n hex digits from the operating system's randomness, for tokens and secrets.
+fn token_hex(n: int) -> str:
+    let digits = "0123456789abcdef"
+    var out = ""
+    var left = 0
+    var v = 0 as u64
+    for _ in 0..n:
+        if left == 0:
+            v = rnd_os_u64() as u64
+            left = 8
+        let b = (v & (255 as u64)) as int
+        v = v >> 8
+        left -= 1
+        out = out + digits[b / 16:b / 16 + 1] + digits[b % 16:b % 16 + 1]
+    return out

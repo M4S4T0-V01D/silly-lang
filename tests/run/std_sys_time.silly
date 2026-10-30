@@ -1,0 +1,32 @@
+# The sys and time modules (dates in UTC so TZ does not matter).
+
+import sys
+import time
+fn main():
+    let a = sys.argv()
+    print(len(a), sys.platform() != "", sys.MAX_INT, sys.MIN_INT, sys.isatty(0) or true)
+    sys.stdout("no newline|")
+    sys.stderr("to stderr\n")
+    let t0 = time.perf_counter()
+    time.sleep(0.05)
+    let dt = time.perf_counter() - t0
+    print(dt >= 0.05 and dt < 0.5, time.time() > 1700000000.0)
+    let d = time.utc(2024, 2, 28, 13, 5, 9)
+    print(d.iso(), d.weekday_name(), d.month_name(), d.yearday, d.timestamp())
+    print(d.add_days(2).iso(), d.add_hours(11).iso(), time.utc(2024, 1, 32, 0, 0, 0).date_str())
+    print(d.format("%A %d %B %Y"), time.days_in_month(2023, 2), time.is_leap(2000))
+    let p = time.parse_iso("2021-07-04 09:30").unwrap()
+    print(p.hour, p.minute, p.month_name(), time.parse_iso("2021-13-01").is_none())
+    print(time.now().year >= 2024)
+    sys.exit(3)
+    print("not reached")
+
+#> 1 true 9223372036854775807 -9223372036854775808 true
+#> no newline|true true
+#> 2024-02-28T13:05:09 Wednesday February 59 1709125509
+#> 2024-03-01T13:05:09 2024-02-29T00:05:09 2024-02-01
+#> Wednesday 28 February 2024 28 true
+#> 9 30 July true
+#> true
+#! exit 3
+#! stderr to stderr

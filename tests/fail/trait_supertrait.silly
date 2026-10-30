@@ -1,0 +1,12 @@
+# error: 'Big' requires 'Show'
+trait Show:
+    fn show(self) -> str
+trait Big(Show):
+    fn big(self) -> int
+struct P:
+    x: int
+impl Big for P:
+    fn big(self) -> int:
+        return 1
+fn main():
+    return

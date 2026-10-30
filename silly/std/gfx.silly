@@ -1,0 +1,459 @@
+# 2D graphics: canvases, anti-aliased shapes, text, images and a window.
+#
+#     import gfx
+#     fn main():
+#         let win = gfx.open("Hello", 400, 300)
+#         var running = true
+#         while running:
+#             for ev in win.events():
+#                 match ev:
+#                     case Quit: running = false
+#                     case _: pass
+#             let c = win.canvas()
+#             c.clear(gfx.WHITE)
+#             c.text(20, 20, "Hello, Silly", gfx.BLACK, gfx.FONT_TITLE)
+#             win.present()
+#             win.wait(16)
+#
+# Colors are ints 0xAARRGGBB (see rgb / rgba). Windows use SDL2 when it is
+# installed and a display is available; otherwise they are headless (see
+# docs/std/gfx.md for SILLY_GFX, SILLY_GFX_SHOT and SILLY_GFX_FRAMES).
+
+extern "gfx_font.c"
+extern "gfx.c" link "-ldl"
+
+extern fn gx_canvas_new(w: int, h: int) -> int
+extern fn gx_canvas_free(id: int)
+extern fn gx_resize(id: int, w: int, h: int)
+extern fn gx_width(id: int) -> int
+extern fn gx_height(id: int) -> int
+extern fn gx_clip(id: int, x: int, y: int, w: int, h: int)
+extern fn gx_unclip(id: int)
+extern fn gx_clear(id: int, color: int)
+extern fn gx_fill_rect(id: int, x: int, y: int, w: int, h: int, color: int)
+extern fn gx_rect(id: int, x: int, y: int, w: int, h: int, t: int, color: int)
+extern fn gx_set_pixel(id: int, x: int, y: int, color: int)
+extern fn gx_get_pixel(id: int, x: int, y: int) -> int
+extern fn gx_blend_pixel(id: int, x: int, y: int, color: int)
+extern fn gx_fill_round_rect(id: int, x: int, y: int, w: int, h: int, r: int, color: int)
+extern fn gx_round_rect(id: int, x: int, y: int, w: int, h: int, r: int, t: int, color: int)
+extern fn gx_fill_circle(id: int, cx: f64, cy: f64, r: f64, color: int)
+extern fn gx_circle(id: int, cx: f64, cy: f64, r: f64, t: f64, color: int)
+extern fn gx_line(id: int, x0: f64, y0: f64, x1: f64, y1: f64, w: f64, color: int)
+extern fn gx_fill_poly(id: int, pts: &list[f64], color: int)
+extern fn gx_gradient(id: int, x: int, y: int, w: int, h: int, c0: int, c1: int, vertical: bool)
+extern fn gx_blit(dst: int, src: int, x: int, y: int, alpha: int)
+extern fn gx_blit_scaled(dst: int, src: int, x: int, y: int, w: int, h: int)
+extern fn gx_read_pixels(id: int, out: &mut list[int])
+extern fn gx_write_pixels(id: int, px: &list[int])
+extern fn gx_text(id: int, x: int, y: int, s: str, color: int, font: int) -> int
+extern fn gx_text_width(s: str, font: int) -> int
+extern fn gx_text_index(s: str, font: int, x: int) -> int
+extern fn gx_font_height(font: int) -> int
+extern fn gx_font_ascent(font: int) -> int
+extern fn gx_save_png(id: int, path: str) -> bool
+extern fn gx_save_ppm(id: int, path: str) -> bool
+extern fn gx_load_image(path: str) -> int
+extern fn gx_open(title: str, w: int, h: int) -> bool
+extern fn gx_backend() -> str
+extern fn gx_close()
+extern fn gx_present(id: int)
+extern fn gx_win_w() -> int
+extern fn gx_win_h() -> int
+extern fn gx_set_title(s: str)
+extern fn gx_poll() -> int
+extern fn gx_wait(ms: int) -> bool
+extern fn gx_headless_frames(n: int)
+extern fn gx_ev(i: int) -> int
+extern fn gx_ev_text() -> str
+extern fn gx_set_cursor(kind: int)
+extern fn gx_clipboard_set(s: str)
+extern fn gx_clipboard_get() -> str
+extern fn gx_ticks() -> int
+extern fn gx_sleep(ms: int)
+
+# ---- colors ----
+
+const BLACK: int = 0xFF000000
+const WHITE: int = 0xFFFFFFFF
+const TRANSPARENT: int = 0
+const RED: int = 0xFFE53935
+const GREEN: int = 0xFF43A047
+const BLUE: int = 0xFF1E88E5
+const YELLOW: int = 0xFFFDD835
+const ORANGE: int = 0xFFFB8C00
+const PURPLE: int = 0xFF8E24AA
+const GRAY: int = 0xFF9E9E9E
+
+# An opaque colour from 0-255 channels.
+fn rgb(r: int, g: int, b: int) -> int:
+    return rgba(r, g, b, 255)
+
+# A colour with alpha (0 transparent, 255 opaque).
+fn rgba(r: int, g: int, b: int, a: int) -> int:
+    return (_byte(a) << 24) | (_byte(r) << 16) | (_byte(g) << 8) | _byte(b)
+
+fn _byte(v: int) -> int:
+    return 0 if v < 0 else (255 if v > 255 else v)
+
+# The color `c` with its alpha replaced by `a` (0..255).
+fn with_alpha(c: int, a: int) -> int:
+    return (c & 0xFFFFFF) | (_byte(a) << 24)
+
+# Linear blend from `a` (t = 0.0) to `b` (t = 1.0), all four channels.
+fn mix(a: int, b: int, t: f64) -> int:
+    var out = 0
+    for sh in [0, 8, 16, 24]:
+        let x = ((a >> sh) & 255) as f64
+        let y = ((b >> sh) & 255) as f64
+        out |= ((x + (y - x) * t + 0.5) as int) << sh
+    return out
+
+# The red channel of c.
+fn red_of(c: int) -> int:
+    return (c >> 16) & 255
+
+# The green channel of c.
+fn green_of(c: int) -> int:
+    return (c >> 8) & 255
+
+# The blue channel of c.
+fn blue_of(c: int) -> int:
+    return c & 255
+
+# The alpha channel of c.
+fn alpha_of(c: int) -> int:
+    return (c >> 24) & 255
+
+# Parses "#rgb", "#rrggbb" or "#aarrggbb" (the "#" is optional).
+fn hex(s: str) -> Option[int]:
+    var t = s[1:] if s.starts_with("#") else s
+    if t.len() == 3:
+        t = t[0:1] + t[0:1] + t[1:2] + t[1:2] + t[2:3] + t[2:3]
+    if t.len() != 6 and t.len() != 8:
+        return None
+    var v = 0
+    for ch in t.chars():
+        let c = ch.lower()
+        if c.is_digit():
+            v = v * 16 + (ord(c) - ord('0'))
+        elif c >= 'a' and c <= 'f':
+            v = v * 16 + (ord(c) - ord('a') + 10)
+        else:
+            return None
+    return Some(v | (0xFF000000 if t.len() == 6 else 0))
+
+# ---- fonts ----
+
+const FONT_SANS: int = 0
+const FONT_BOLD: int = 1
+const FONT_MONO: int = 2
+const FONT_SMALL: int = 3
+const FONT_HEADING: int = 4
+const FONT_TITLE: int = 5
+
+# How many pixels wide s is in font.
+fn text_width(s: str, font: int) -> int:
+    return gx_text_width(s, font)
+
+# Byte offset of the character boundary nearest to `x` pixels into `s`.
+fn text_index(s: str, font: int, x: int) -> int:
+    return gx_text_index(s, font, x)
+
+# The line height of font in pixels.
+fn font_height(font: int) -> int:
+    return gx_font_height(font)
+
+# Pixels from the top of a line to font's baseline.
+fn font_ascent(font: int) -> int:
+    return gx_font_ascent(font)
+
+# ---- canvases ----
+
+# A pixel buffer. Canvases are handles: copies refer to the same pixels, and
+# the pixels live until free() (or the end of the program).
+struct Canvas:
+    id: int
+
+    fn width(self) -> int:
+        return gx_width(self.id)
+
+    fn height(self) -> int:
+        return gx_height(self.id)
+
+    fn free(self):
+        gx_canvas_free(self.id)
+
+    # Changes the size, keeping the overlapping pixels; resets the clip.
+    fn resize(self, w: int, h: int):
+        gx_resize(self.id, w, h)
+
+    # Restricts drawing to a rectangle (clipped to the canvas).
+    fn clip(self, x: int, y: int, w: int, h: int):
+        gx_clip(self.id, x, y, w, h)
+
+    fn unclip(self):
+        gx_unclip(self.id)
+
+    # Sets every pixel inside the clip to `color` (no blending).
+    fn clear(self, color: int):
+        gx_clear(self.id, color)
+
+    fn fill_rect(self, x: int, y: int, w: int, h: int, color: int):
+        gx_fill_rect(self.id, x, y, w, h, color)
+
+    # A rectangle outline `t` pixels thick, drawn inside the rectangle.
+    fn rect(self, x: int, y: int, w: int, h: int, t: int, color: int):
+        gx_rect(self.id, x, y, w, h, t, color)
+
+    fn fill_round_rect(self, x: int, y: int, w: int, h: int, r: int, color: int):
+        gx_fill_round_rect(self.id, x, y, w, h, r, color)
+
+    fn round_rect(self, x: int, y: int, w: int, h: int, r: int, t: int, color: int):
+        gx_round_rect(self.id, x, y, w, h, r, t, color)
+
+    fn fill_circle(self, cx: f64, cy: f64, r: f64, color: int):
+        gx_fill_circle(self.id, cx, cy, r, color)
+
+    fn circle(self, cx: f64, cy: f64, r: f64, t: f64, color: int):
+        gx_circle(self.id, cx, cy, r, t, color)
+
+    # An anti-aliased line `w` pixels wide with round ends.
+    fn line(self, x0: f64, y0: f64, x1: f64, y1: f64, w: f64, color: int):
+        gx_line(self.id, x0, y0, x1, y1, w, color)
+
+    # Connected line segments through points given as [x0, y0, x1, y1, ...].
+    fn polyline(self, pts: list[f64], w: f64, color: int):
+        var i = 0
+        while i + 3 < pts.len():
+            gx_line(self.id, pts[i], pts[i + 1], pts[i + 2], pts[i + 3], w, color)
+            i += 2
+
+    # A filled polygon from points [x0, y0, x1, y1, ...] (nonzero winding).
+    fn fill_poly(self, pts: list[f64], color: int):
+        gx_fill_poly(self.id, &pts, color)
+
+    fn fill_triangle(self, x0: f64, y0: f64, x1: f64, y1: f64, x2: f64, y2: f64, color: int):
+        let pts = [x0, y0, x1, y1, x2, y2]
+        gx_fill_poly(self.id, &pts, color)
+
+    fn gradient_v(self, x: int, y: int, w: int, h: int, top: int, bottom: int):
+        gx_gradient(self.id, x, y, w, h, top, bottom, true)
+
+    fn gradient_h(self, x: int, y: int, w: int, h: int, left: int, right: int):
+        gx_gradient(self.id, x, y, w, h, left, right, false)
+
+    fn set_pixel(self, x: int, y: int, color: int):
+        gx_set_pixel(self.id, x, y, color)
+
+    # Blends `color` over the pixel at (x, y).
+    fn blend_pixel(self, x: int, y: int, color: int):
+        gx_blend_pixel(self.id, x, y, color)
+
+    # The pixel at (x, y), or 0 outside the canvas.
+    fn pixel(self, x: int, y: int) -> int:
+        return gx_get_pixel(self.id, x, y)
+
+    # Draws `s` with the top-left of its line box at (x, y); returns its width.
+    fn text(self, x: int, y: int, s: str, color: int, font: int) -> int:
+        return gx_text(self.id, x, y, s, color, font)
+
+    # Draws `s` centred in the rectangle (x, y, w, h).
+    fn text_centered(self, x: int, y: int, w: int, h: int, s: str, color: int, font: int):
+        let tw = gx_text_width(s, font)
+        gx_text(self.id, x + (w - tw) / 2, y + (h - gx_font_height(font)) / 2, s, color, font)
+
+    # Blends all of `src` onto this canvas at (x, y), with extra opacity `alpha` (0..255).
+    fn blit(self, src: Canvas, x: int, y: int, alpha: int):
+        gx_blit(self.id, src.id, x, y, alpha)
+
+    # Stretches all of `src` over (x, y, w, h), nearest-neighbour.
+    fn blit_scaled(self, src: Canvas, x: int, y: int, w: int, h: int):
+        gx_blit_scaled(self.id, src.id, x, y, w, h)
+
+    # Every pixel, row by row.
+    fn pixels(self) -> list[int]:
+        var out: list[int] = []
+        for _ in 0..self.width() * self.height():
+            out.push(0)
+        gx_read_pixels(self.id, &mut out)
+        return out
+
+    fn set_pixels(self, px: &list[int]):
+        gx_write_pixels(self.id, px)
+
+    fn save_png(self, path: str) -> bool:
+        return gx_save_png(self.id, path)
+
+    fn save_ppm(self, path: str) -> bool:
+        return gx_save_ppm(self.id, path)
+
+# A new canvas, transparent black.
+fn canvas(w: int, h: int) -> Canvas:
+    return Canvas(gx_canvas_new(w, h))
+
+# Loads a binary PPM (P6) or an uncompressed BMP.
+fn load_image(path: str) -> Option[Canvas]:
+    let id = gx_load_image(path)
+    return Some(Canvas(id)) if id != 0 else None
+
+# ---- events ----
+
+const MOD_SHIFT: int = 1
+const MOD_CTRL: int = 2
+const MOD_ALT: int = 4
+const MOD_SUPER: int = 8
+
+const MOUSE_LEFT: int = 1
+const MOUSE_MIDDLE: int = 2
+const MOUSE_RIGHT: int = 3
+
+# Key codes (printable keys are their lowercase character: 'a' as int).
+const KEY_RETURN: int = 0x0D
+const KEY_ESCAPE: int = 0x1B
+const KEY_BACKSPACE: int = 0x08
+const KEY_TAB: int = 0x09
+const KEY_SPACE: int = 0x20
+const KEY_DELETE: int = 0x7F
+const KEY_RIGHT: int = 0x4000004F
+const KEY_LEFT: int = 0x40000050
+const KEY_DOWN: int = 0x40000051
+const KEY_UP: int = 0x40000052
+const KEY_HOME: int = 0x4000004A
+const KEY_END: int = 0x4000004D
+const KEY_PAGE_UP: int = 0x4000004B
+const KEY_PAGE_DOWN: int = 0x4000004E
+const KEY_INSERT: int = 0x40000049
+const KEY_KP_ENTER: int = 0x40000058
+const KEY_F1: int = 0x4000003A
+
+# Function key n (1..12).
+fn key_f(n: int) -> int:
+    return KEY_F1 + n - 1
+
+# Something that happened to a window (see Window.poll()).
+enum Event:
+    Quit
+    Resize(w: int, h: int)
+    MouseMove(x: int, y: int)
+    MouseDown(x: int, y: int, button: int, clicks: int)
+    MouseUp(x: int, y: int, button: int)
+    Wheel(dx: int, dy: int)
+    KeyDown(key: int, mods: int, repeat: bool)
+    KeyUp(key: int, mods: int)
+    Text(str)
+    FocusIn
+    FocusOut
+    Expose
+    MouseLeave
+
+fn _event(t: int) -> Option[Event]:
+    match t:
+        case 1: return Some(Event.Quit)
+        case 2: return Some(Event.Resize(gx_ev(0), gx_ev(1)))
+        case 3: return Some(Event.MouseMove(gx_ev(0), gx_ev(1)))
+        case 4: return Some(Event.MouseDown(gx_ev(0), gx_ev(1), gx_ev(2), gx_ev(3)))
+        case 5: return Some(Event.MouseUp(gx_ev(0), gx_ev(1), gx_ev(2)))
+        case 6: return Some(Event.Wheel(gx_ev(0), gx_ev(1)))
+        case 7: return Some(Event.KeyDown(gx_ev(0), gx_ev(1), gx_ev(2) != 0))
+        case 8: return Some(Event.KeyUp(gx_ev(0), gx_ev(1)))
+        case 9: return Some(Event.Text(gx_ev_text()))
+        case 10: return Some(Event.FocusIn)
+        case 11: return Some(Event.FocusOut)
+        case 12: return Some(Event.Expose)
+        case 13: return Some(Event.MouseLeave)
+        case _: return None
+
+# ---- windows ----
+
+const CURSOR_ARROW: int = 0
+const CURSOR_TEXT: int = 1
+const CURSOR_WAIT: int = 2
+const CURSOR_CROSSHAIR: int = 3
+const CURSOR_RESIZE_H: int = 7
+const CURSOR_RESIZE_V: int = 8
+const CURSOR_MOVE: int = 9
+const CURSOR_NO: int = 10
+const CURSOR_HAND: int = 11
+
+# The program's window (one at a time) and its back buffer, which follows the
+# window's size.
+struct Window:
+    back: Canvas
+
+    # The back buffer, resized to the window if the window changed size.
+    fn canvas(self) -> Canvas:
+        let w = gx_win_w()
+        let h = gx_win_h()
+        if w != self.back.width() or h != self.back.height():
+            self.back.resize(w, h)
+        return self.back
+
+    fn width(self) -> int:
+        return gx_win_w()
+
+    fn height(self) -> int:
+        return gx_win_h()
+
+    # Shows the back buffer.
+    fn present(self):
+        gx_present(self.back.id)
+
+    # The next pending event, if any.
+    fn poll(self) -> Option[Event]:
+        return _event(gx_poll())
+
+    # All pending events.
+    fn events(self) -> list[Event]:
+        var out: list[Event] = []
+        while true:
+            let t = gx_poll()
+            if t == 0:
+                break
+            match _event(t):
+                case Some(e): out.push(e)
+                case None: pass
+        return out
+
+    # Sleeps until an event arrives or `ms` milliseconds pass; true if an event is ready.
+    fn wait(self, ms: int) -> bool:
+        return gx_wait(ms)
+
+    fn set_title(self, s: str):
+        gx_set_title(s)
+
+    fn set_cursor(self, kind: int):
+        gx_set_cursor(kind)
+
+    # Headless only: send Quit after `n` presented frames (0 = never), unless
+    # SILLY_GFX_FRAMES is set.
+    fn set_frame_limit(self, n: int):
+        gx_headless_frames(n)
+
+    # "sdl" or "headless".
+    fn backend(self) -> str:
+        return gx_backend()
+
+    fn close(self):
+        gx_close()
+
+# Opens the window.
+fn open(title: str, w: int, h: int) -> Window:
+    gx_open(title, w, h)
+    return Window(Canvas(gx_canvas_new(w, h)))
+
+# Puts s on the system clipboard.
+fn clipboard_set(s: str):
+    gx_clipboard_set(s)
+
+# The clipboard's text, or "".
+fn clipboard_get() -> str:
+    return gx_clipboard_get()
+
+# Milliseconds since the first call (monotonic).
+fn ticks() -> int:
+    return gx_ticks()
+
+# Waits ms milliseconds.
+fn sleep_ms(ms: int):
+    gx_sleep(ms)

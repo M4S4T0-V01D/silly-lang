@@ -1,0 +1,162 @@
+# Reading and writing CSV, like Python's csv module.
+#
+#     import csv
+#     fn main():
+#         let rows = csv.parse("name,qty\r\npen,\"1,5\"\r\n")
+#         print(rows)                                  # [["name", "qty"], ["pen", "1,5"]]
+#         for r in csv.parse_dicts("name,qty\npen,3\n"):
+#             print(r["name"], r["qty"])               # pen 3
+#         print(csv.format(&[["a", "b c"], ["x,y", "say \"hi\""]]))
+#         # a,b c
+#         # "x,y","say ""hi"""
+#
+# Parsing follows Python's default (excel) dialect and is just as forgiving: a
+# quote inside an unquoted field is kept, text after a closing quote is
+# appended, and an unterminated quoted field runs to the end. Rows may end in
+# \r\n, \n or \r; a blank line is an empty row. Writing quotes a field only when
+# it has to (it holds the delimiter, a quote, \r or \n), doubling inner quotes.
+
+# How fields are separated and quoted (see excel()).
+struct Dialect:
+    delimiter: char
+    quote: char
+    line_end: str
+    quote_all: bool                 # quote every field when writing
+
+# Comma-separated, \r\n line ends (Python's default).
+fn excel() -> Dialect:
+    return Dialect(',', '"', "\r\n", false)
+
+# Tab-separated.
+fn tsv() -> Dialect:
+    return Dialect('\t', '"', "\r\n", false)
+
+# Comma-separated with \n line ends and every field quoted (Python's unix dialect).
+fn unix() -> Dialect:
+    return Dialect(',', '"', "\n", true)
+
+# ---- reading ----
+
+# The rows of comma-separated text.
+fn parse(text: &str) -> list[list[str]]:
+    return parse_with(text, &excel())
+
+# The rows of text written in dialect d.
+fn parse_with(text: &str, d: &Dialect) -> list[list[str]]:
+    let cs = text.chars()
+    let n = len(cs)
+    var rows: list[list[str]] = []
+    var row: list[str] = []
+    var field = ""
+    var i = 0
+    # Whether the current row has begun: a blank line gives an empty row, but
+    # "," gives two empty fields.
+    var started = false
+    while i < n:
+        let c = cs[i]
+        if c == d.quote and field == "" and (not started or cs[i - 1] == d.delimiter):
+            # A quoted field: up to the closing quote, "" standing for one quote.
+            started = true
+            i += 1
+            while i < n:
+                if cs[i] == d.quote:
+                    if i + 1 < n and cs[i + 1] == d.quote:
+                        field += str(d.quote)
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                field += str(cs[i])
+                i += 1
+            continue
+        if c == d.delimiter:
+            row.push(take(&mut field))
+            started = true
+            i += 1
+            continue
+        if c == '\r' or c == '\n':
+            if started or field != "":
+                row.push(take(&mut field))
+            rows.push(take(&mut row))
+            started = false
+            i += 1
+            if c == '\r' and i < n and cs[i] == '\n':
+                i += 1
+            continue
+        field += str(c)
+        started = true
+        i += 1
+    if started or field != "":
+        row.push(field)
+        rows.push(row)
+    return rows
+
+# Rows as maps keyed by the first row's names. A short row leaves the missing
+# keys as ""; fields beyond the header are dropped. Empty rows are skipped.
+fn parse_dicts(text: &str) -> list[map[str, str]]:
+    return parse_dicts_with(text, &excel())
+
+# Like parse_dicts, in dialect d.
+fn parse_dicts_with(text: &str, d: &Dialect) -> list[map[str, str]]:
+    let rows = parse_with(text, d)
+    var out: list[map[str, str]] = []
+    if len(rows) == 0:
+        return out
+    let header = rows[0].clone()
+    for i in 1..len(rows):
+        if len(rows[i]) == 0:
+            continue
+        var m: map[str, str] = {}
+        for j in 0..len(header):
+            m[header[j].clone()] = rows[i][j].clone() if j < len(rows[i]) else ""
+        out.push(m)
+    return out
+
+# ---- writing ----
+
+fn _needs_quotes(f: &str, d: &Dialect) -> bool:
+    for c in f.chars():
+        if c == d.delimiter or c == d.quote or c == '\r' or c == '\n':
+            return true
+    return false
+
+fn _field(f: &str, d: &Dialect, alone: bool) -> str:
+    # A row of one empty field is written as "" so it doesn't read back as a blank line.
+    if d.quote_all or _needs_quotes(f, d) or (alone and f == ""):
+        let q = str(d.quote)
+        return q + f.replace(q, q + q) + q
+    return f.clone()
+
+# One row with its line ending.
+fn format_row(fields: &list[str], d: &Dialect) -> str:
+    var out = ""
+    for i in 0..len(fields):
+        if i > 0:
+            out += str(d.delimiter)
+        out += _field(&fields[i], d, len(fields) == 1)
+    return out + d.line_end
+
+# rows as comma-separated text, quoting fields that need it.
+fn format(rows: &list[list[str]]) -> str:
+    return format_with(rows, &excel())
+
+# rows as text in dialect d.
+fn format_with(rows: &list[list[str]], d: &Dialect) -> str:
+    var out = ""
+    for r in rows:
+        out += format_row(r, d)
+    return out
+
+# A header row, then each map's values in header order ("" when a key is missing).
+fn format_dicts(header: &list[str], rows: &list[map[str, str]]) -> str:
+    return format_dicts_with(header, rows, &excel())
+
+# Like format_dicts, in dialect d.
+fn format_dicts_with(header: &list[str], rows: &list[map[str, str]], d: &Dialect) -> str:
+    var out = format_row(header, d)
+    for m in rows:
+        var fields: list[str] = []
+        for k in header:
+            fields.push(m.get_or(k.clone(), ""))
+        out += format_row(&fields, d)
+    return out

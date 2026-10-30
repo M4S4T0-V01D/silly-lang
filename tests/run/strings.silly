@@ -1,0 +1,40 @@
+fn main():
+    let s = "  Hello, World  "
+    let t = s.trim()
+    print(t, len(t))
+    print(t.upper(), t.lower())
+    print(t.starts_with("Hell"), t.ends_with("x"), t.find("World"), t.find("zz"))
+    print(t.replace("l", "L"), t.count("l"))
+    let parts = "a,b,,c".split(",")
+    print(parts, len(parts))
+    print("-".join(parts))
+    print(t[0:5], t[7:])
+    print("42".parse_int(), "x1".parse_int(), "2.5".parse_float())
+    let name = "silly"
+    let n = 3
+    print(f"{name} has {len(name)} letters, n={n:>4}|{n:<4}|{n:04}")
+    print(f"{3.14159:.2f} {1.0/3.0:.4f}")
+    var lines = 0
+    for l in "one\ntwo\nthree".lines():
+        lines += 1
+    print(lines)
+    print(ord('A'), chr(98), "abc" < "abd", "abc" == "abc")
+    print("x" * 3, "ab" + "cd")
+    let cs = "hey".chars()
+    print(cs)
+    print(str(12) + str(true) + str(1.5))
+#> Hello, World 12
+#> HELLO, WORLD hello, world
+#> true false Some(7) None
+#> HeLLo, WorLd 3
+#> ["a", "b", "", "c"] 4
+#> a-b--c
+#> Hello World
+#> Some(42) None Some(2.5)
+#> silly has 5 letters, n=   3|3   |0003
+#> 3.14 0.3333
+#> 3
+#> 65 b true true
+#> xxx abcd
+#> ['h', 'e', 'y']
+#> 12true1.5

@@ -1,0 +1,140 @@
+# A calculator: tokenizer, recursive-descent parser and evaluator.
+#
+# There is no heap, so the syntax tree is not a web of pointers. Nodes live in
+# a list and refer to each other by index: one growing buffer, freed as a whole.
+
+enum Tok:
+    Num(f64)
+    Op(char)
+    LParen
+    RParen
+
+enum Node:
+    Lit(f64)
+    Bin(op: char, l: int, r: int)
+    Neg(int)
+
+fn tokenize(src: str) -> Result[list[Tok], str]:
+    var out: list[Tok] = []
+    let cs = src.chars()
+    var i = 0
+    while i < len(cs):
+        let c = cs[i]
+        if c == ' ':
+            i += 1
+        elif c.is_digit() or c == '.':
+            var j = i
+            while j < len(cs) and (cs[j].is_digit() or cs[j] == '.'):
+                j += 1
+            let v = src[i:j].parse_float().ok_or(f"bad number '{src[i:j]}'")?
+            out.push(Tok.Num(v))
+            i = j
+        elif c in "+-*/^":
+            out.push(Tok.Op(c))
+            i += 1
+        elif c == '(':
+            out.push(Tok.LParen)
+            i += 1
+        elif c == ')':
+            out.push(Tok.RParen)
+            i += 1
+        else:
+            return Err(f"unexpected '{c}' at column {i + 1}")
+    return Ok(out)
+
+struct Parser:
+    toks: list[Tok]
+    pos: int
+    nodes: list[Node]
+
+    fn peek_op(self) -> Option[char]:
+        if self.pos < len(self.toks):
+            match self.toks[self.pos]:
+                case Op(c): return Some(c)
+                case _: return None
+        return None
+
+    fn add(mut self, n: Node) -> int:
+        self.nodes.push(n)
+        return len(self.nodes) - 1
+
+    # expr := term (('+' | '-') term)*
+    fn expr(mut self) -> Result[int, str]:
+        var l = self.term()?
+        loop:
+            let op = self.peek_op()
+            if op != Some('+') and op != Some('-'):
+                return Ok(l)
+            self.pos += 1
+            let r = self.term()?
+            l = self.add(Node.Bin(op.unwrap(), l, r))
+
+    # term := unary (('*' | '/') unary)*
+    fn term(mut self) -> Result[int, str]:
+        var l = self.unary()?
+        loop:
+            let op = self.peek_op()
+            if op != Some('*') and op != Some('/'):
+                return Ok(l)
+            self.pos += 1
+            let r = self.unary()?
+            l = self.add(Node.Bin(op.unwrap(), l, r))
+
+    # unary := '-' unary | power
+    fn unary(mut self) -> Result[int, str]:
+        if self.peek_op() == Some('-'):
+            self.pos += 1
+            let x = self.unary()?
+            return Ok(self.add(Node.Neg(x)))
+        return self.power()
+
+    # power := atom ('^' unary)?      (right-associative)
+    fn power(mut self) -> Result[int, str]:
+        let base = self.atom()?
+        if self.peek_op() == Some('^'):
+            self.pos += 1
+            let e = self.unary()?
+            return Ok(self.add(Node.Bin('^', base, e)))
+        return Ok(base)
+
+    fn atom(mut self) -> Result[int, str]:
+        if self.pos >= len(self.toks):
+            return Err("unexpected end of input")
+        let t = self.toks[self.pos]
+        self.pos += 1
+        match t:
+            case Num(v): return Ok(self.add(Node.Lit(v)))
+            case LParen:
+                let inner = self.expr()?
+                if self.pos >= len(self.toks) or self.toks[self.pos] != Tok.RParen:
+                    return Err("expected ')'")
+                self.pos += 1
+                return Ok(inner)
+            case _: return Err("expected a number or '('")
+
+fn eval(nodes: &list[Node], i: int) -> f64:
+    match nodes[i]:
+        case Lit(v): return v
+        case Neg(x): return -eval(nodes, x)
+        case Bin(op, l, r):
+            let a = eval(nodes, l)
+            let b = eval(nodes, r)
+            match op:
+                case '+': return a + b
+                case '-': return a - b
+                case '*': return a * b
+                case '/': return a / b
+                case _: return a ** b
+
+fn calc(src: str) -> Result[f64, str]:
+    var p = Parser(tokenize(src)?, 0, [])
+    let root = p.expr()?
+    if p.pos != len(p.toks):
+        return Err("trailing input")
+    return Ok(eval(&p.nodes, root))
+
+fn main():
+    for src in ["1 + 2 * 3", "(1 + 2) * 3", "2 ^ 3 ^ 2", "-(4 - 6) / 0.5", "1 +", "3 $ 4"]:
+        match calc(src):
+            case Ok(v): print(f"{src:<16} = {v}")
+            case Err(msg): print(f"{src:<16} ! {msg}")

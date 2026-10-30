@@ -1,0 +1,91 @@
+# Loops that change outer storage compact it instead of keeping every iteration's garbage.
+
+enum Shape:
+    Dot
+    Named(str, list[int])
+
+struct World:
+    names: list[str]
+    tags: map[str, int]
+    shapes: list[Shape]
+    title: str
+
+fn rss_kb() -> int:
+    let s = read_file("/proc/self/status").unwrap()
+    for l in s.lines():
+        if l.starts_with("VmRSS:"):
+            return l[6:].trim().split(" ")[0].parse_int().unwrap()
+    return 0
+
+fn grow(w: &mut World, i: int):
+    # scratch strings stay behind in the caller's loop region
+    var tmp: list[str] = []
+    for k in 0..20:
+        tmp.push(f"scratch {i} {k}")
+    if i % 1000 == 0:
+        w.names.push(f"name{i}")
+        w.tags[f"tag{i % 7}"] = i
+        w.shapes.push(Shape.Named(f"s{i}", [i, len(tmp)]))
+    w.title = f"title {i}"
+
+fn fill(xs: &mut list[str], n: int):
+    for i in 0..n:
+        let junk = f"{i}{i}{i}{i}{i}{i}{i}{i}"
+        xs.push(junk[0:3])
+
+fn main():
+    var w = World([], {}, [Shape.Dot], "")
+    let before = rss_kb()
+    for i in 0..60000:
+        grow(&mut w, i)
+    print(len(w.names), w.names[59], len(w.tags), w.tags["tag3"], w.title, len(w.shapes))
+    match w.shapes[60]:
+        case Named(n, xs): print(n, xs)
+        case Dot: print("dot")
+    print("bounded:", rss_kb() - before < 20000)
+
+    # an accumulating list: compaction must stay linear
+    var big: list[str] = []
+    for i in 0..300000:
+        big.push(f"item-{i}")
+    print(len(big), big[0], big[299999])
+
+    # nested loops carrying different variables, and a closure carried out
+    var rows: list[list[str]] = []
+    var f: fn(int) -> int = fn(x) => x
+    var label = ""
+    for r in 0..300:
+        var row: list[str] = []
+        for c in 0..50:
+            row.push(f"{r}:{c}")
+            label = f"last {r} {c}"
+        let k = len(row)
+        f = fn(x) => x * k + r
+        rows.push(row)
+    print(len(rows), rows[299][49], rows[7][3], label, f(2))
+
+    # a carried variable behind a &mut parameter
+    var out: list[str] = []
+    for round in 0..40:
+        fill(&mut out, 1000)
+    print(len(out), out[0], out[39999])
+
+    # break leaves the carried value intact
+    var acc = ""
+    var n = 0
+    while true:
+        n += 1
+        acc = f"{acc}{n % 10}"
+        let waste = f"{acc}{acc}"
+        if len(waste) > 4000:
+            break
+    print(len(acc), acc[0:12])
+
+# expected output
+#> 60 name59000 7 53000 title 59999 61
+#> s59000 [59000, 20]
+#> bounded: true
+#> 300000 item-0 item-299999
+#> 300 299:49 7:3 last 299 49 399
+#> 40000 000 999
+#> 2001 123456789012
