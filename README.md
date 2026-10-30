@@ -229,3 +229,7 @@ Known limits:
 
 The fonts built into `gfx` are rasterized from DejaVu; their licence is in
 [docs/licenses/dejavu.txt](docs/licenses/dejavu.txt).
+
+## License
+
+Silly is released under the [MIT License](LICENSE).
